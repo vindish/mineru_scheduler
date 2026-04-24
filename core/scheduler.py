@@ -111,7 +111,7 @@ class Scheduler:
 
                     if empty_rounds >= 5:
                         logger.warning("[SCHEDULER] 连续空轮询，触发修复")
-                        # self._auto_heal_tasks()
+                        self._auto_heal_tasks()
                         empty_rounds = 0
 
                     time.sleep(1)

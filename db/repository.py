@@ -47,11 +47,11 @@ def fetch_runnable_tasks(limit=200):
 
     rows = cursor.execute("""
         SELECT * FROM tasks
-        WHERE (locked=0 OR (? - locked_at > 300))
+        WHERE (locked=0)
         AND status NOT IN ('DEAD', 'DOWNLOADED', 'SPLIT_DONE')
         AND (next_run_time IS NULL OR next_run_time <= ?)
         LIMIT ?
-    """, (now,now, limit)).fetchall()
+    """, (now, limit)).fetchall()
 
     return [TaskRow(r) for r in rows]   # 🔥 核心改动
 
@@ -86,28 +86,33 @@ def heal_locks(timeout=300):
     return unlock_timeout, unlock_broken
 
 def lock_tasks(task_ids):
+    if not task_ids:
+        return []
+
     conn = get_conn()
     cursor = conn.cursor()
 
     now = int(time.time())
-    success = []
 
-    with db_lock:   # ✅ 防并发抢锁冲突 改成✅ 更优写法（批量锁）
+    with db_lock:
         cursor.execute(f"""
-                UPDATE tasks
-                SET locked=1, locked_at=?
-                WHERE id IN ({','.join(['?']*len(task_ids))})
-                AND locked=0
-            """, [now, *task_ids])
-
-        for tid in task_ids:
-
-            if cursor.rowcount == 1:
-                success.append(tid)
+            UPDATE tasks
+            SET locked=1, locked_at=?
+            WHERE id IN ({','.join(['?']*len(task_ids))})
+            AND locked=0
+        """, [now, *task_ids])
 
         conn.commit()
 
-    return success
+        # 🔥 正确方式：再查一遍
+        rows = cursor.execute(f"""
+            SELECT id FROM tasks
+            WHERE id IN ({','.join(['?']*len(task_ids))})
+            AND locked=1
+            AND locked_at=?
+        """, [*task_ids, now]).fetchall()
+
+        return [r["id"] for r in rows]
 
 
 def update_tasks(updates):

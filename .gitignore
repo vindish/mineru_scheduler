@@ -20,6 +20,7 @@ split/
 # 日志
 *.log
 logs/
+TODO.md
 
 # 数据库
 *.db

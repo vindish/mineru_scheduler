@@ -36,3 +36,6 @@ Thumbs.db
 # Node（如果有前端）
 node_modules/
 .next/
+
+# 配置文件
+.env

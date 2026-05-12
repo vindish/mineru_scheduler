@@ -1,5 +1,7 @@
 from pathlib import Path
 from config.settings import BASE_DIR,DB_NAME,SCAN_DIRS
+import hashlib
+import re
 import shutil
 # 文件存储规范层
 # 它负责统一管理“文件保存路径”和“文件是否存在”的逻辑
@@ -46,6 +48,25 @@ class Storage:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _safe_stem(self, value, fallback="file"):
+        raw = str(value or "").strip()
+        if not raw:
+            return fallback
+
+        # 兼容从 Windows 入库的路径：Path("Z:\\a\\b.pdf").stem 在 Linux
+        # 下不会把反斜杠识别为目录分隔符，需要先按两类分隔符切分。
+        basename = re.split(r"[\\/]+", raw)[-1]
+        stem = Path(basename).stem or fallback
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem)
+        stem = re.sub(r"\s+", " ", stem).strip(" ._") or fallback
+
+        digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+        max_len = 160
+        if len(stem) > max_len:
+            stem = stem[:max_len].rstrip(" ._")
+
+        return f"{stem}_{digest}"
+
     def get_download_path(self, file_name=None, task_id=None, file_path=None):
         """
         下载文件路径（统一规范）
@@ -53,21 +74,14 @@ class Storage:
         """
 
         if task_id:
-            name = Path(file_name).stem if file_name else str(task_id)
+            name = self._safe_stem(file_name or file_path or str(task_id), str(task_id))
             path = self.download_dir / str(task_id) / f"{name}.zip"
 
-        # elif file_path:
-        #     file_path = Path(file_path)
-        #     path = self.download_dir / file_path.with_suffix(".zip")
         elif file_path:
-            # 👉 确保是 Path
-            file_path = Path(file_path)
-
-            # 👉 取文件名（避免嵌套目录）
-            name = file_path.stem
+            name = self._safe_stem(file_path)
             path = self.download_dir / f"{name}.zip"
         else:
-            name = Path(file_name).stem
+            name = self._safe_stem(file_name)
             path = self.download_dir / f"{name}.zip"
 
         path.parent.mkdir(parents=True, exist_ok=True)

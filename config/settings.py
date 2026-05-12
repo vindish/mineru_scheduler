@@ -1,12 +1,21 @@
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
+TOKEN = os.getenv("MINERU_TOKEN")
+
 LOG_DIR = Path("data/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ========= 基础配置 =========
 # TOKEN = ""
-TOKEN = os.getenv("MINERU_TOKEN")
+# TOKEN = os.getenv("MINERU_TOKEN")
 
 UPLOAD_URL = "https://mineru.net/api/v4/file-urls/batch" 
 # API_URL = "https://mineru.net/api/v4/file-urls/batch"
@@ -15,12 +24,12 @@ UPLOAD_URL = "https://mineru.net/api/v4/file-urls/batch"
 POLL_URL =  f"https://mineru.net/api/v4/extract-results/batch/"
 
 
-BASE_DIR = r"data"
+BASE_DIR = r"/mnt/nas/downloadBT/code_Project/quiz_taskrow_system/scheduler_system/data"
 # SPLIT_DIR = r"data\split"
 DB_NAME="tasks1.db"
 
 SCAN_DIRS = [
-    "data/pdf",
+    "/mnt/nas/downloadBT/code_Project/quiz_taskrow_system/scheduler_system/data/pdf",
     # "pdf_extra",
     # "pdf_history"
 ]

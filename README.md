@@ -506,3 +506,53 @@ temporary sqlite database
 - 错误类型标准化。
 - 测试覆盖关键路径。
 - 为 PostgreSQL、Redis 和多 worker 架构做演进准备。
+
+
+# update
+已修复这类下载失败。
+
+  根因是 file_path 里保存了 Windows 路径，例如 Z:\School\...\正文.pdf。Linux 下 Path(file_path).stem 不会把 \ 当目录分隔符，导致生成了这种非法保存路径：
+
+  data/download/Z:\School\...\正文.zip
+
+  我做了这些修改：
+
+  - 在 services/storage.py 增加 _safe_stem()：
+      - 兼容 / 和 \ 两种路径分隔符
+      - 去掉 Windows/NAS 不安全字符：<>:"/\|?*
+      - 去掉控制字符
+      - 限制文件名长度
+      - 添加 8 位 hash，避免同名文件覆盖
+
+  现在会生成类似：
+
+  data/download/正文_af70768c.zip
+  data/download/第24讲-逻辑推理[一]_dcc33786.zip
+  data/download/Vector Calculus - Theodore Voronov_4fa9acc5.zip
+
+  另外顺手修了两个会影响运行的小问题：
+
+  - config/settings.py：python-dotenv 未安装时不再直接启动失败。
+  - scripts/repair_tasks.py：补了缺失的 logger import。
+
+  验证已通过：
+
+  python3 -m compileall config/settings.py services/storage.py scripts/repair_tasks.py handlers/download_handler.py
+  git diff --check
+
+  已经失败的任务需要重新放回队列，例如执行：
+
+  UPDATE tasks
+  SET status='DOWNLOADING',
+      locked=0,
+      locked_at=NULL,
+      next_run_time=NULL,
+      last_error=NULL
+  WHERE status='FAILED'
+    AND last_error LIKE '%Invalid argument%';
+
+  这样这些下载失败的任务会用新的安全路径重新下载。
+
+─ Worked for 4m 13s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+<!--  -->

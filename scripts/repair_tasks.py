@@ -1,5 +1,6 @@
 from db.repository import update_tasks
 from db.task_row import TaskRow
+from utils.logger import logger
 import sys
 
 def repair_dead(task_ids):

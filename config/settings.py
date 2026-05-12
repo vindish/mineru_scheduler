@@ -78,7 +78,7 @@ VALID_TRANSITIONS = {
     "DOWNLOADING": ["DOWNLOADED", "FAILED"],
     # "DONE": ["DOWNLOADED"],
     "FAILED": ["SPLIT_NEEDED","INIT", "DEAD","FAILED"],
-    "SPLIT_NEEDED": ["SPLIT_DONE","FAILED"],
+    "SPLIT_NEEDED": ["SPLIT_DONE","FAILED","DEAD"],
     # "SPLIT_DONE": ["INIT"],    
 }
 
@@ -128,6 +128,7 @@ TASK_COLUMNS = [
     "locked_at",
     "last_error",
     "error_type",
+    "parent_id",
     "dead_at",
     "created_at",
     "updated_at",

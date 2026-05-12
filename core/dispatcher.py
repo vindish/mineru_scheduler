@@ -4,6 +4,7 @@ from handlers.poll_handler import PollHandler
 from handlers.download_handler import DownloadHandler
 from handlers.split_handler import SplitHandler
 from handlers.fail_handler import FailHandler
+from db.repository import unlock_tasks
 from utils.logger import logger
 
 class Dispatcher:
@@ -35,5 +36,6 @@ class Dispatcher:
             handler.handle_batch(tasks)
             logger.info(f"[DISPATCH] {status} -> {len(tasks)}")
 
-        except Exception as e:
+        except Exception:
             logger.exception("[DISPATCH ERROR]")
+            unlock_tasks([t.id for t in tasks])

@@ -98,7 +98,6 @@ class UploadHandler:
             err = str(e)
 
             logger.error(f"[UPLOAD ERROR] {err}")
-            logger.info("[UPLOAD ERROR]", err)
             for t in valid:
                 tid = t.id
 

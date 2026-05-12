@@ -1,8 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
-
-
-from queue import Queue
 import threading
+from utils.logger import logger
 
 class WorkerPool:
     def __init__(self, max_workers):
@@ -18,4 +16,15 @@ class WorkerPool:
             finally:
                 self.semaphore.release()
 
-        self.executor.submit(wrapper)
+        future = self.executor.submit(wrapper)
+        future.add_done_callback(self._log_failure)
+        return future
+
+    @staticmethod
+    def _log_failure(future):
+        exc = future.exception()
+        if exc:
+            logger.error(
+                "[WORKER ERROR]",
+                exc_info=(type(exc), exc, exc.__traceback__)
+            )

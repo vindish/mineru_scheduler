@@ -59,8 +59,8 @@ class Watchdog:
 
                 # conn.commit()
 
-            except Exception as e:
-                logger.info("[WATCHDOG ERROR]", e)
+            except Exception:
+                logger.exception("[WATCHDOG ERROR]")
 
             time.sleep(self.interval)
             # time.sleep(60)

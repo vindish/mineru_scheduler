@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     locked_at INTEGER,
     last_error TEXT,
     error_type TEXT,
+    parent_id INTEGER,
     dead_at REAL,
     created_at REAL,
     updated_at REAL
@@ -22,5 +23,6 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_locked ON tasks(locked);
 CREATE INDEX IF NOT EXISTS idx_next_run ON tasks(next_run_time);
-CREATE INDEX IF NOT EXISTS idx_file_path ON tasks(file_path);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_file_path ON tasks(file_path);
+CREATE INDEX IF NOT EXISTS idx_parent_id ON tasks(parent_id);
 """

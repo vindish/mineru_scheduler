@@ -20,7 +20,6 @@ class FailHandler:
             return
 
         logger.info(f"[FAIL] batch={len(tasks)}")
-        logger.info(f"[FAIL] batch={len(tasks)}")
 
         retry_tasks = []
         split_tasks = []

@@ -18,7 +18,6 @@ class PollHandler:
     def handle_batch(self, tasks: list[TaskRow]):
         updates = []
         logger.info(f"[POLL] batch={len(tasks)}")
-        logger.info(f"[POLL] batch={len(tasks)}")
         for t in tasks:
 
 
@@ -95,5 +94,3 @@ class PollHandler:
             logger.info(f"[POLL] done={done} polling={polling} failed={failed}")
         if updates:
             update_tasks(updates)
-
-        

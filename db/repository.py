@@ -39,6 +39,33 @@ def get_cursor():
     return get_conn().cursor()
 
 
+def ensure_schema():
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    columns = {
+        row["name"]
+        for row in cursor.execute("PRAGMA table_info(tasks)").fetchall()
+    }
+
+    migrations = {
+        "parent_id": "ALTER TABLE tasks ADD COLUMN parent_id INTEGER",
+        "dead_at": "ALTER TABLE tasks ADD COLUMN dead_at REAL",
+        "error_type": "ALTER TABLE tasks ADD COLUMN error_type TEXT",
+        "locked_at": "ALTER TABLE tasks ADD COLUMN locked_at INTEGER",
+        "updated_at": "ALTER TABLE tasks ADD COLUMN updated_at REAL",
+    }
+
+    with db_lock:
+        for name, sql in migrations.items():
+            if name not in columns:
+                cursor.execute(sql)
+                logger.info(f"[DB MIGRATION] added column: {name}")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_parent_id ON tasks(parent_id)")
+        conn.commit()
+
+
 def fetch_runnable_tasks(limit=200):
     conn = get_conn()
     cursor = conn.cursor()
@@ -115,6 +142,22 @@ def lock_tasks(task_ids):
         return [r["id"] for r in rows]
 
 
+def unlock_tasks(task_ids):
+    if not task_ids:
+        return
+
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    with db_lock:
+        cursor.execute(f"""
+            UPDATE tasks
+            SET locked=0, locked_at=NULL, updated_at=?
+            WHERE id IN ({','.join(['?'] * len(task_ids))})
+        """, [time.time(), *task_ids])
+        conn.commit()
+
+
 def update_tasks(updates):
     if not updates:
         return
@@ -157,12 +200,13 @@ def update_tasks(updates):
             values = []
 
             for k, v in u.items():
-                if k == task_id:
+                if k == "id":
                     continue
                 fields.append(f"{k}=?")
                 values.append(v)
 
             fields.append("locked=0")
+            fields.append("locked_at=NULL")
             fields.append("updated_at=?")
             values.append(time.time())
             values.append(task_id)
@@ -204,5 +248,3 @@ def insert_tasks(new_tasks):
         ])
 
         conn.commit()
-
-

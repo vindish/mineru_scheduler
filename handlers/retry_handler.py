@@ -15,7 +15,6 @@ class RetryHandler:
     def handle_batch(self, tasks: list[TaskRow]):
         updates = []
         logger.info(f"[retry] batch={len(tasks)}")
-        logger.info(f"[retry] batch={len(tasks)}")
         for t in tasks:
             task_id = t.id 
             retry_count =  t.retry_count

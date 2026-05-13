@@ -1,140 +1,135 @@
 # MinerU Scheduler
 
-MinerU Scheduler 是一个面向批量 PDF 解析任务的本地调度系统。它负责扫描本地 PDF 文件，调用 MinerU 接口创建上传任务，上传文件，轮询解析结果，下载结果压缩包，并对失败任务进行重试、拆分或归档处理。
+MinerU Scheduler 是一个面向 MinerU 批量 PDF 解析的本地调度系统。它扫描本地 PDF，写入 SQLite 任务表，按状态机调度任务，调用 MinerU API 创建上传批次、PUT 上传文件、轮询解析结果、下载结果 ZIP，并对失败任务做重试、拆分和死信归档。
 
-项目当前使用 Python + SQLite 实现，适合单机批量处理场景。代码按调度、处理器、服务封装、数据库访问和工具层拆分，核心目标是让大量 PDF 文件可以稳定、限速、可恢复地流转完成。
+当前版本重点适配官方频控策略：
+
+- 单日提交上限：`5000` 份。
+- 单文件页数上限：`200` 页。
+- 高优每日额度：`1000` 页。
+- 提交频控：按 `50` 文件/分钟的本地 token bucket 控制。
+
+项目目标不是盲目加并发，而是在本地可恢复、可观测、可限速的前提下，尽量贴近官方频控上限跑满吞吐。
+
+## 快速入口
+
+- AI 接手先读：[docs/AI_HANDOFF.md](docs/AI_HANDOFF.md)
+- 架构说明：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 任务流程：[docs/FLOW.md](docs/FLOW.md)
+- 配置说明：[docs/CONFIG.md](docs/CONFIG.md)
+- 数据库说明：[docs/DATABASE.md](docs/DATABASE.md)
+- 运行维护：[docs/OPERATIONS.md](docs/OPERATIONS.md)
 
 ## 核心能力
 
-- 自动扫描 `data/pdf` 下的 PDF 文件并写入任务表。
-- 基于任务状态进行优先级调度。
-- 支持上传、PUT 上传、轮询、下载、失败重试、PDF 拆分等完整链路。
-- 使用线程池执行任务，支持不同阶段的 QPS 限速。
-- 使用 SQLite WAL 模式保存任务状态。
-- 使用任务锁避免重复调度。
-- Watchdog 自动释放超时锁，减少异常退出后的任务卡死。
-- 支持失败任务指数退避重试。
-- 对超限 PDF 支持拆分后重新进入处理流程。
-- 对不可恢复任务写入 DEAD 状态。
-- 日志同时输出到控制台和 `data/logs`。
+- 自动扫描配置目录下的 PDF 文件，并以 `INIT` 状态写入任务表。
+- 使用 SQLite WAL 模式保存任务、锁、重试次数、错误、页数和 MinerU 返回信息。
+- 使用 `Scheduler -> Dispatcher -> Handler` 分层调度任务。
+- 每个处理阶段有独立 QPS 限速器：创建上传批次、PUT 上传、轮询、下载。
+- 本地持久化每日 MinerU 额度，防止超过 `5000` 文件/天。
+- 本地按分钟 token bucket 控制提交速度，目标贴近 `50` 文件/分钟。
+- 上传前读取 PDF 页数，超过 `200` 页自动进入拆分流程。
+- 失败任务可指数退避重试；不可恢复任务进入 `DEAD`。
+- Watchdog 自动释放超时锁，降低异常退出后任务卡死概率。
+- 日志输出到控制台和 `data/logs`。
 
-## 处理流程
+## 当前处理链路
 
 ```text
 扫描 PDF
-  ↓
-INIT
-  ↓ 创建 MinerU 上传批次
-UPLOADED
-  ↓ PUT 文件到 upload_url
-PUT_DONE
-  ↓ 轮询 MinerU 解析结果
-DOWNLOADING
-  ↓ 下载 full_zip_url
-DOWNLOADED
+  -> tasks.status = INIT
+  -> 调度器读取页数和额度
+  -> 创建 MinerU 上传批次
+  -> UPLOADED
+  -> PUT 上传 PDF 到 upload_url
+  -> PUT_DONE
+  -> 轮询 MinerU batch 结果
+  -> DOWNLOADING
+  -> 下载 full_zip_url
+  -> DOWNLOADED
 ```
 
 失败分支：
 
 ```text
-任意处理阶段
-  ↓
-FAILED
-  ├─ 可重试错误      → INIT
-  ├─ 文件过大/超限   → SPLIT_NEEDED → SPLIT_DONE + 子任务 INIT
-  └─ 致命错误        → DEAD
+任意阶段失败
+  -> FAILED
+  -> FailHandler
+     -> 可重试错误：INIT + next_run_time 延后
+     -> 超页/超限：SPLIT_NEEDED
+     -> 致命文件错误：DEAD
 ```
 
-## 任务状态说明
+超页拆分分支：
 
-| 状态 | 含义 |
-| --- | --- |
-| `INIT` | 初始任务，等待创建上传批次 |
-| `UPLOADED` | 已获取 MinerU 上传 URL，等待 PUT 上传文件 |
-| `PUT_DONE` | 文件已上传，等待轮询解析结果 |
-| `DOWNLOADING` | MinerU 已解析完成，等待下载结果 ZIP |
-| `DOWNLOADED` | 结果已下载完成 |
-| `FAILED` | 当前处理失败，等待失败处理器分流 |
-| `SPLIT_NEEDED` | 文件需要拆分 |
-| `SPLIT_DONE` | 原始文件拆分完成，子任务已生成 |
-| `DEAD` | 不再处理的死信任务 |
-
-状态流转由 `config/settings.py` 中的 `VALID_TRANSITIONS` 控制，数据库更新时会校验非法状态迁移。
+```text
+INIT 读取 page_count > MAX_FILE_PAGES
+  -> SPLIT_NEEDED
+  -> SplitHandler 使用 PDFSplitter 拆成 <= 200 页子 PDF
+  -> 原任务 SPLIT_DONE
+  -> 子任务 INIT
+```
 
 ## 项目结构
 
 ```text
 .
-├── main.py                    # 程序入口，启动自检、扫描线程、监控线程、调度器
+├── main.py                    # 入口：自检、建表、扫描线程、监控线程、调度器
 ├── config/
-│   └── settings.py            # 全局配置、QPS、并发、状态机、建表 SQL
+│   └── settings.py            # API、路径、官方频控、并发、状态机、建表 SQL
 ├── core/
-│   ├── scheduler.py           # 主调度循环，拉取任务、加锁、按状态分发
-│   ├── dispatcher.py          # 根据状态选择对应 Handler
-│   ├── worker_pool.py         # 线程池封装
-│   ├── rate_limiter.py        # 简单 QPS 限速与自适应调整
-│   └── watchdog.py            # 锁修复和运行监控
+│   ├── scheduler.py           # 主调度循环：拉取、加锁、分组、额度预留、投递
+│   ├── dispatcher.py          # 根据 status 调用对应 Handler
+│   ├── quota_manager.py       # MinerU 本地额度管理：日额度 + 分钟 token bucket
+│   ├── worker_pool.py         # ThreadPoolExecutor + 信号量背压
+│   ├── rate_limiter.py        # 阶段级 QPS 限速与简单自适应
+│   └── watchdog.py            # 周期释放超时锁
 ├── handlers/
-│   ├── upload_handler.py      # 创建 MinerU 上传批次
+│   ├── upload_handler.py      # 创建 MinerU 上传批次，成功后提交额度
 │   ├── put_handler.py         # PUT 上传 PDF 文件
-│   ├── poll_handler.py        # 轮询解析结果
-│   ├── download_handler.py    # 下载结果 ZIP
+│   ├── poll_handler.py        # 轮询 MinerU 解析状态
+│   ├── download_handler.py    # 下载解析结果 ZIP
 │   ├── fail_handler.py        # 失败分流
-│   ├── retry_handler.py       # 重试与退避
-│   └── split_handler.py       # PDF 拆分并生成子任务
+│   ├── retry_handler.py       # 指数退避重试
+│   └── split_handler.py       # 拆分超页 PDF 并生成子任务
 ├── services/
 │   ├── mineru_client.py       # MinerU HTTP API 封装
-│   ├── storage.py             # 本地目录和文件路径管理
-│   ├── pdf_splitter.py        # PDF 拆分逻辑
+│   ├── storage.py             # 数据目录、DB 路径、下载路径、拆分路径
+│   ├── pdf_splitter.py        # PyPDF2 拆分实现
 │   └── file_watcher.py        # 文件监听扩展入口
 ├── db/
-│   ├── repository.py          # SQLite 连接、查询、加锁、更新、迁移
-│   ├── task_row.py            # 任务行对象封装
-│   ├── migrations.sql         # 建表/索引 SQL 参考
-│   └── update_buffer.py       # 更新缓冲层雏形
-├── task_queue/
-│   ├── dlq.py                 # 死信队列处理
-│   └── priority_queue.py      # 优先级排序工具
+│   ├── repository.py          # SQLite 连接、迁移、查询、锁、更新、插入
+│   ├── task_row.py            # TaskRow 对象封装
+│   ├── migrations.sql         # 建表 SQL 参考
+│   └── update_buffer.py       # 更新缓冲扩展入口
 ├── scripts/
-│   ├── scan_tasks.py          # 扫描 PDF 并插入任务
-│   ├── repair_tasks.py        # 修复 DEAD 任务脚本
+│   ├── scan_tasks.py          # 扫描 PDF 并写入 INIT 任务
+│   ├── repair_tasks.py        # 修复任务脚本
 │   ├── reset_tasks.sql        # 重置任务 SQL
 │   └── retry_failed.sql       # 重试失败任务 SQL
-└── utils/
-    ├── logger.py              # 日志配置
-    ├── startup_check.py       # 启动自检
-    ├── backoff.py             # 指数退避
-    ├── decorators.py          # 限速装饰器
-    └── time_utils.py          # 时间工具
+├── task_queue/
+│   ├── dlq.py                 # DEAD 状态写入
+│   └── priority_queue.py      # 优先级排序工具
+├── utils/
+│   ├── logger.py              # 日志
+│   ├── startup_check.py       # 启动自检
+│   ├── backoff.py             # 指数退避
+│   ├── decorators.py          # 限速装饰器
+│   └── time_utils.py          # 时间工具
+└── docs/                      # 面向人和 AI 的项目说明
 ```
 
 ## 运行环境
 
-建议使用 Python 3.10 或更高版本。
+建议 Python 3.10+。
 
-代码中使用到的第三方库包括：
-
-- `requests`
-- `PyPDF2` 或项目当前 `pdf_splitter.py` 所依赖的 PDF 库
-- `watchdog`，仅文件监听扩展需要
-
-如果项目还没有依赖文件，建议后续补充 `requirements.txt`。
-
-## 快速开始
-
-1. 创建数据目录并放入 PDF：
+依赖见 [requirements.txt](requirements.txt)：
 
 ```bash
-mkdir -p data/pdf
+pip install -r requirements.txt
 ```
 
-将待处理 PDF 放入：
-
-```text
-data/pdf/
-```
-
-2. 配置 MinerU Token：
+需要设置 MinerU Token：
 
 ```bash
 export MINERU_TOKEN="你的 MinerU Token"
@@ -146,413 +141,156 @@ Windows PowerShell：
 $env:MINERU_TOKEN="你的 MinerU Token"
 ```
 
-3. 启动：
+## 启动
 
 ```bash
 python3 main.py
 ```
 
-Windows 也可以使用：
+Windows 可使用：
 
 ```bat
 run.bat
 ```
 
-启动后程序会：
+启动后会执行：
 
-- 执行启动自检。
-- 初始化 `data/db/tasks1.db`。
-- 定期扫描 `data/pdf`。
-- 启动调度器处理任务。
-- 定期输出任务总数、完成数、失败数。
+1. `run_checks()` 启动自检。
+2. 初始化 SQLite 表和索引。
+3. `ensure_schema()` 迁移旧库字段。
+4. 后台启动 `scan_loop()`，周期扫描 PDF。
+5. 后台启动 `monitor_loop()`，周期输出任务总数、完成数、失败数。
+6. 启动 `Scheduler.run()` 主循环。
 
 ## 目录约定
 
-运行后会自动生成以下目录：
+路径由 `services/storage.py` 和 `config/settings.py` 决定。当前默认 `BASE_DIR` 是项目作者本机 NAS 路径：
+
+```text
+/mnt/nas/downloadBT/code_Project/quiz_taskrow_system/scheduler_system/data
+```
+
+如果迁移机器，优先修改：
+
+- `BASE_DIR`
+- `SCAN_DIRS`
+- `DB_NAME`
+
+运行时数据目录结构：
 
 ```text
 data/
 ├── pdf/          # 输入 PDF
 ├── split/        # 拆分后的 PDF
-├── download/     # 下载的结果 ZIP
+├── download/     # 下载的 ZIP 结果
 ├── output/       # 预留输出目录
 ├── temp/         # 临时文件
 ├── db/           # SQLite 数据库
-└── logs/         # 运行日志
+└── logs/         # 日志
 ```
 
-## 配置说明
+## 关键配置
 
-主要配置位于 `config/settings.py`。
+主要配置在 [config/settings.py](config/settings.py)。
 
-| 配置 | 说明 |
-| --- | --- |
-| `TOKEN` | 从环境变量 `MINERU_TOKEN` 读取 |
-| `UPLOAD_URL` | MinerU 创建上传批次接口 |
-| `POLL_URL` | MinerU 轮询接口前缀 |
-| `BASE_DIR` | 数据根目录，默认 `data` |
-| `DB_NAME` | SQLite 数据库文件名 |
-| `SCAN_DIRS` | 扫描 PDF 的目录列表 |
-| `MAX_WORKERS` | 线程池最大线程数 |
-| `QPS_UPLOAD` | 创建上传批次限速 |
-| `QPS_PUT` | PUT 上传限速 |
-| `QPS_POLL` | 轮询限速 |
-| `QPS_DOWNLOAD` | 下载限速 |
-| `FETCH_LIMIT` | 调度器每轮最多拉取任务数 |
-| `BATCH_SIZE` | 每批提交给 handler 的任务数 |
-| `MAX_RETRY` | 最大重试次数 |
-| `SCAN_INTERVAL` | 扫描间隔 |
-| `SCHEDULER_PRIORITY` | 调度优先级 |
-| `VALID_TRANSITIONS` | 状态机合法迁移规则 |
+官方频控：
 
-## 数据库表
+| 配置 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `DAILY_FILE_LIMIT` | `5000` | 每自然日最多提交文件数 |
+| `MAX_FILE_PAGES` | `200` | 单文件最大页数 |
+| `HIGH_PRIORITY_DAILY_PAGE_LIMIT` | `1000` | 高优每日页额度 |
+| `SUBMIT_FILE_RATE_PER_MINUTE` | `50` | 本地提交 token bucket 速率 |
 
-核心表为 `tasks`。
+吞吐相关：
 
-重要字段：
+| 配置 | 当前值 | 含义 |
+| --- | ---: | --- |
+| `MAX_WORKERS` | `12` | 线程池最大线程数 |
+| `FETCH_LIMIT` | `200` | 调度器每轮最多拉取任务数 |
+| `BATCH_SIZE` | `50` | Handler 批大小 |
+| `UPLOAD_CONCURRENCY` | `50` | INIT 阶段每轮最多投递 |
+| `PUT_CONCURRENCY` | `30` | UPLOADED 阶段每轮最多投递 |
+| `POLL_CONCURRENCY` | `20` | PUT_DONE 阶段每轮最多投递 |
+| `DOWNLOADING` | `20` | DOWNLOADING 阶段每轮最多投递 |
 
-| 字段 | 说明 |
-| --- | --- |
-| `id` | 任务 ID |
-| `file_path` | PDF 文件路径，唯一索引 |
-| `file_name` | 文件名 |
-| `status` | 当前任务状态 |
-| `api_task_id` | MinerU batch_id |
-| `upload_url` | PUT 上传地址 |
-| `zip_url` | 解析结果下载地址 |
-| `retry_count` | 当前重试次数 |
-| `max_retry` | 最大重试次数 |
-| `next_run_time` | 下次允许运行时间 |
-| `locked` | 是否被调度锁定 |
-| `locked_at` | 锁定时间 |
-| `last_error` | 最近错误 |
-| `error_type` | 错误类型 |
-| `parent_id` | 拆分子任务对应的父任务 ID |
-| `dead_at` | 进入 DEAD 的时间 |
-| `created_at` | 创建时间 |
-| `updated_at` | 更新时间 |
+QPS：
 
-启动时 `ensure_schema()` 会对旧库补充缺失字段和索引。
+| 配置 | 当前值 | 对应阶段 |
+| --- | ---: | --- |
+| `QPS_UPLOAD` | `1.0` | 创建上传批次 |
+| `QPS_PUT` | `10.0` | PUT 上传文件 |
+| `QPS_POLL` | `15.0` | 轮询解析结果 |
+| `QPS_DOWNLOAD` | `5.0` | 下载结果 |
 
-## 调度机制
+## 数据库
 
-`Scheduler` 每轮执行以下步骤：
+核心业务表：
 
-1. 从数据库拉取可运行任务。
-2. 使用 `lock_tasks()` 将任务标记为 `locked=1`。
-3. 按 `SCHEDULER_PRIORITY` 分组。
-4. 根据不同状态的并发配额截断任务数量。
-5. 提交到 `WorkerPool`。
-6. `Dispatcher` 根据状态调用对应 handler。
-7. handler 成功或失败后调用 `update_tasks()` 写回状态，并释放锁。
+- `tasks`：任务状态、文件路径、锁、重试、错误、页数、MinerU batch/url 信息。
+- `api_quota_usage`：每日 MinerU 提交额度和高优页额度使用量。
 
-如果 handler 抛出未捕获异常，`Dispatcher` 会记录异常并调用 `unlock_tasks()` 释放本批任务，避免任务永久卡住。
+`tasks.status` 是系统的主状态机。合法流转由 `VALID_TRANSITIONS` 控制，`update_tasks()` 会拒绝非法状态迁移。
 
-## 锁和恢复机制
+详见 [docs/DATABASE.md](docs/DATABASE.md)。
 
-任务锁字段：
+## 额度策略
 
-```text
-locked
-locked_at
+额度策略由 [core/quota_manager.py](core/quota_manager.py) 管理：
+
+- 每次调度 `INIT` 前，先读取 PDF 页数。
+- 页数超过 `MAX_FILE_PAGES` 的任务直接转 `SPLIT_NEEDED`。
+- 页数合格后调用 `reserve_submission_batch()` 预留文件额度。
+- 若日额度不足，任务延后到次日。
+- 若分钟 token 不足，任务按 token 恢复时间延后。
+- `UploadHandler` 创建上传批次成功后调用 `commit_reservations()`。
+- 上传前本地校验失败或 API 调用失败时调用 `release_reservations()`。
+
+注意：当前代码没有向 MinerU API 写入未知的“高优”请求参数，只在本地记录高优页额度。若官方 API 后续提供明确参数，应在 `services/mineru_client.py:create_upload_batch()` 中补充，并同步更新文档。
+
+## 常用命令
+
+语法检查：
+
+```bash
+python3 -m compileall core handlers db services config utils main.py
 ```
 
-调度器只拉取 `locked=0` 的任务。任务被分发前会被锁住，处理完成后由 `update_tasks()` 解锁。
+查看改动：
 
-`Watchdog` 会周期性调用 `heal_locks()`：
+```bash
+git status --short
+git diff --stat
+git diff --check
+```
 
-- 释放超过超时时间的锁。
-- 释放 `locked=1` 但 `locked_at IS NULL` 的异常锁。
+直接查看数据库：
 
-这可以处理程序异常退出、worker 崩溃或未预期异常导致的任务卡死。
+```bash
+sqlite3 /path/to/tasks1.db
+```
 
-## 日志
-
-日志配置在 `utils/logger.py`。
-
-输出位置：
-
-- 控制台
-- `data/logs/run_YYYYMMDD_HHMMSS.log`
-
-常见日志前缀：
-
-| 前缀 | 含义 |
-| --- | --- |
-| `[SCAN]` | 扫描任务 |
-| `[SCHEDULER]` | 调度器 |
-| `[DISPATCH]` | 任务分发 |
-| `[UPLOAD]` | 创建上传任务 |
-| `[PUT FAIL]` | PUT 上传失败 |
-| `[POLL]` | 轮询解析状态 |
-| `[DOWNLOAD]` | 下载结果 |
-| `[FAIL]` | 失败分流 |
-| `[WATCHDOG]` | 锁恢复 |
-| `[MONITOR]` | 任务统计 |
-
-## 常用维护操作
-
-查看任务统计：
+常用 SQL：
 
 ```sql
 SELECT status, COUNT(*) FROM tasks GROUP BY status;
+SELECT * FROM api_quota_usage ORDER BY quota_date DESC LIMIT 5;
+SELECT id, status, file_name, last_error FROM tasks WHERE status='FAILED' LIMIT 20;
 ```
-
-重试失败任务：
-
-```sql
-UPDATE tasks
-SET status='INIT',
-    locked=0,
-    locked_at=NULL,
-    next_run_time=NULL
-WHERE status='FAILED';
-```
-
-释放所有锁：
-
-```sql
-UPDATE tasks
-SET locked=0,
-    locked_at=NULL
-WHERE locked=1;
-```
-
-查看死信任务：
-
-```sql
-SELECT id, file_name, last_error
-FROM tasks
-WHERE status='DEAD'
-ORDER BY dead_at DESC;
-```
-
-## 当前限制
-
-- 仍是单机 SQLite 架构，高并发和多进程部署能力有限。
-- 状态流转还依赖 handler 手动设置 `t.status`，存在人为写错状态的风险。
-- 任务更新是直接批量写库，尚未实现稳定的写缓冲和批量提交策略。
-- 没有完善的单元测试和集成测试。
-- 没有依赖锁定文件，例如 `requirements.txt`。
-- 配置仍集中在 Python 文件中，不支持 `.env` 或 YAML/TOML 配置。
-- MinerU API 错误类型分类还比较粗，需要更细的错误码策略。
-- 文件监听能力存在扩展入口，但主流程当前以定时扫描为主。
-- 缺少结构化指标暴露，例如 Prometheus metrics。
-
-## 后续更新方向
-
-### 1. 数据库升级
-
-当前 SQLite 适合本地单机批处理。后续如果任务量继续增加，建议迁移到 PostgreSQL：
-
-- 使用行级锁或 `SELECT ... FOR UPDATE SKIP LOCKED` 做并发任务领取。
-- 支持多进程、多机器调度。
-- 提升大任务量下的查询、索引和写入能力。
-- 保留 SQLite 作为本地轻量模式。
-
-### 2. 引入 Redis 分布式锁和队列
-
-后续可以将调度改为 Redis + Pipeline Scheduler：
-
-- Redis 负责短期任务队列和分布式锁。
-- PostgreSQL 负责最终任务状态。
-- Scheduler 只负责领取和投递任务。
-- Worker 可以水平扩展。
-
-目标架构：
-
-```text
-Scanner → PostgreSQL → Scheduler → Redis Queue → Worker Pool → MinerU API
-                         ↑                         ↓
-                       Watchdog ←────────────── Status Update
-```
-
-### 3. TaskRow 状态机升级
-
-建议把状态迁移逻辑收敛到 `TaskRow`：
-
-```python
-t.transition("PUT_DONE")
-t.mark_failed(error)
-t.mark_dead(error_type="FATAL")
-t.mark_retry(next_run_time)
-t.mark_split_needed()
-```
-
-这样 handler 不再直接写：
-
-```python
-t.status = "FAILED"
-```
-
-收益：
-
-- 减少非法状态迁移。
-- 统一清理字段，例如失败时清理 URL 或成功时清理错误。
-- 更容易测试状态机。
-- 方便未来扩展状态审计日志。
-
-### 4. 更新缓冲层
-
-`db/update_buffer.py` 可以继续完善为稳定的 micro-batch 写入层：
-
-- 多个 worker 只提交状态变更对象。
-- 单独写线程批量 flush。
-- 降低 SQLite 写锁竞争。
-- 后续迁移 PostgreSQL 时也能复用批量更新模型。
-
-### 5. 完善错误分类
-
-当前 `FailHandler` 主要依赖错误文本判断。后续建议引入标准错误类型：
-
-- `RATE_LIMIT`
-- `FILE_MISSING`
-- `INVALID_PDF`
-- `PDF_TOO_LARGE`
-- `NETWORK_TIMEOUT`
-- `API_ERROR`
-- `AUTH_ERROR`
-- `UNKNOWN`
-
-每个 handler 捕获异常后写入 `error_type`，失败处理器根据 `error_type` 分流。
-
-### 6. 增加测试体系
-
-建议补充：
-
-- `TaskRow` 状态机测试。
-- `repository` 状态迁移测试。
-- `Scheduler` 加锁和解锁测试。
-- `FailHandler` 错误分流测试。
-- `MineruClient` HTTP mock 测试。
-- PDF 拆分测试。
-
-推荐使用：
-
-```text
-pytest
-responses 或 requests-mock
-temporary sqlite database
-```
-
-### 7. 配置和部署标准化
-
-建议增加：
-
-- `.env.example`
-- `requirements.txt` 或 `pyproject.toml`
-- Dockerfile
-- docker-compose 示例
-- 日志等级配置
-- 不同环境的配置文件
-
-### 8. 可观测性增强
-
-后续可以增加：
-
-- 任务状态统计接口。
-- Prometheus metrics。
-- 失败原因排行榜。
-- 每个阶段耗时统计。
-- QPS、失败率、队列长度监控。
-- 简单 Web Dashboard。
-
-### 9. 文件监听替代轮询扫描
-
-当前主流程使用定时扫描。后续可以将 `services/file_watcher.py` 接入主程序：
-
-- 新 PDF 创建后立即入库。
-- 定时扫描作为兜底。
-- 避免大目录频繁 `rglob` 带来的开销。
-
-### 10. 更安全的结果管理
-
-下载文件当前按 PDF stem 生成 ZIP 名称。后续建议：
-
-- 使用任务 ID 作为结果目录。
-- 保存 MinerU 返回的原始 JSON。
-- 记录下载文件大小和 checksum。
-- 对下载 ZIP 做完整性校验。
-- 防止同名文件覆盖。
-
-## 推荐近期开发顺序
-
-1. 补 `requirements.txt` 和 `.env.example`。
-2. 为 `TaskRow` 增加状态方法，收敛状态变更。
-3. 给 `repository` 和 `FailHandler` 增加测试。
-4. 完善错误类型枚举，减少字符串判断。
-5. 接入 `UpdateBuffer` 做批量状态写入。
-6. 增加 SQLite 到 PostgreSQL 的迁移方案。
-7. 增加基础 Dashboard 或 metrics。
 
 ## 开发注意事项
 
-- 不要绕过 `update_tasks()` 直接更新任务状态，除非是维护脚本。
-- 新增状态时必须同步更新 `VALID_TRANSITIONS`。
-- handler 内部应保证每个任务最终写回状态或被解锁。
-- 外部 API 请求必须经过限速器，避免触发 429。
-- 对可能长期运行的任务要设置合理超时。
-- 对文件路径统一使用 `Storage`，避免散落路径拼接。
-- 对批量任务保持幂等，重复执行不应破坏已有结果。
+- `update_tasks()` 只接受 `TaskRow`，并强校验状态迁移。
+- Handler 处理完成后必须通过 `update_tasks()` 写回，否则锁不会释放。
+- 调度器已经会释放未投递任务锁，不要在 Handler 内重复处理不属于本批的任务。
+- 新增状态时必须同步更新 `VALID_TRANSITIONS`、调度优先级和文档。
+- 修改 MinerU 提交流程时必须考虑 `ApiQuotaManager` 的预留、提交、释放三段式。
+- SQLite 适合当前单机模型；如果要多进程或多机器调度，必须重做锁和 quota 的并发语义。
 
-## 当前项目定位
+## 当前边界
 
-这个项目目前处于可用的单机批处理调度器阶段。它已经具备完整业务链路、任务状态持久化、限速、重试和基础恢复能力。
-
-下一阶段的重点不是继续堆 handler，而是提升工程可靠性：
-
-- 状态机模型化。
-- 数据库写入体系化。
-- 错误类型标准化。
-- 测试覆盖关键路径。
-- 为 PostgreSQL、Redis 和多 worker 架构做演进准备。
-
-
-# update
-已修复这类下载失败。
-
-  根因是 file_path 里保存了 Windows 路径，例如 Z:\School\...\正文.pdf。Linux 下 Path(file_path).stem 不会把 \ 当目录分隔符，导致生成了这种非法保存路径：
-
-  data/download/Z:\School\...\正文.zip
-
-  我做了这些修改：
-
-  - 在 services/storage.py 增加 _safe_stem()：
-      - 兼容 / 和 \ 两种路径分隔符
-      - 去掉 Windows/NAS 不安全字符：<>:"/\|?*
-      - 去掉控制字符
-      - 限制文件名长度
-      - 添加 8 位 hash，避免同名文件覆盖
-
-  现在会生成类似：
-
-  data/download/正文_af70768c.zip
-  data/download/第24讲-逻辑推理[一]_dcc33786.zip
-  data/download/Vector Calculus - Theodore Voronov_4fa9acc5.zip
-
-  另外顺手修了两个会影响运行的小问题：
-
-  - config/settings.py：python-dotenv 未安装时不再直接启动失败。
-  - scripts/repair_tasks.py：补了缺失的 logger import。
-
-  验证已通过：
-
-  python3 -m compileall config/settings.py services/storage.py scripts/repair_tasks.py handlers/download_handler.py
-  git diff --check
-
-  已经失败的任务需要重新放回队列，例如执行：
-
-  UPDATE tasks
-  SET status='DOWNLOADING',
-      locked=0,
-      locked_at=NULL,
-      next_run_time=NULL,
-      last_error=NULL
-  WHERE status='FAILED'
-    AND last_error LIKE '%Invalid argument%';
-
-  这样这些下载失败的任务会用新的安全路径重新下载。
-
-─ Worked for 4m 13s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-<!--  -->
+- 项目是单机调度器，不是分布式队列。
+- `api_quota_usage` 的分钟 token 是进程内状态，进程重启后分钟桶会恢复满，但日额度仍持久化。
+- 高优额度目前是本地账本，没有官方高优 API 参数接入。
+- `BASE_DIR` 和 `SCAN_DIRS` 当前写死为 NAS 路径，迁移环境时需要修改。
+- `TODO.md` 中记录了一些历史想法，但当前项目事实以代码和 `docs/` 为准。

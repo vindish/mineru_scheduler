@@ -54,6 +54,7 @@ def ensure_schema():
         "error_type": "ALTER TABLE tasks ADD COLUMN error_type TEXT",
         "locked_at": "ALTER TABLE tasks ADD COLUMN locked_at INTEGER",
         "updated_at": "ALTER TABLE tasks ADD COLUMN updated_at REAL",
+        "page_count": "ALTER TABLE tasks ADD COLUMN page_count INTEGER",
     }
 
     with db_lock:

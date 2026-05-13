@@ -16,8 +16,9 @@ from db.task_row import TaskRow
 
 
 class UploadHandler:
-    def __init__(self, rate_limiter=None):
+    def __init__(self, rate_limiter=None, quota_manager=None):
         self.rate_limiter = rate_limiter
+        self.quota_manager = quota_manager
         self.client = MineruClient(rate_limiter=self.rate_limiter)
 
     def handle_batch(self, tasks: list[TaskRow]):
@@ -56,16 +57,22 @@ class UploadHandler:
 
 
         if not files:
+            if self.quota_manager and tasks:
+                self.quota_manager.release_reservations(tasks)
             if updates:
                 update_tasks(updates)
             return
+
+        invalid = [t for t in tasks if t not in valid]
+        if invalid and self.quota_manager:
+            self.quota_manager.release_reservations(invalid)
 
         # =========================
         # 2. 调 API
         # =========================
         try:
 
-            
+
             data = self.client.create_upload_batch(files)
             # logger.info("UPLOAD data =", data)
             # logger.info(f"[UPLOAD] {data}")
@@ -93,11 +100,16 @@ class UploadHandler:
                 t.locked = 0
                 updates.append(t)
 
+            if self.quota_manager:
+                self.quota_manager.commit_reservations(valid)
+
 
         except Exception as e:
             err = str(e)
 
             logger.error(f"[UPLOAD ERROR] {err}")
+            if self.quota_manager:
+                self.quota_manager.release_reservations(valid)
             for t in valid:
                 tid = t.id
 

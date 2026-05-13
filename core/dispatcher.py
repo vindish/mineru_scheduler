@@ -9,11 +9,11 @@ from utils.logger import logger
 
 class Dispatcher:
 
-    def __init__(self, rate_limiter, upload_limiter, put_limiter, poll_limiter, download_limiter):
+    def __init__(self, rate_limiter, upload_limiter, put_limiter, poll_limiter, download_limiter, quota_manager=None):
         self.rate_limiter = rate_limiter
 
         self.handlers = {
-            "INIT": UploadHandler(upload_limiter),
+            "INIT": UploadHandler(upload_limiter, quota_manager=quota_manager),
             "UPLOADED": PutHandler(put_limiter),
             "PUT_DONE": PollHandler(poll_limiter),
             "DOWNLOADING": DownloadHandler(download_limiter),

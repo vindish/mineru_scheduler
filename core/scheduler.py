@@ -3,16 +3,18 @@ from collections import defaultdict
 import traceback
 from config.settings import (
     MAX_WORKERS, QPS, FETCH_LIMIT, SCHEDULER_PRIORITY,BATCH_SIZE,QPS_UPLOAD,QPS_PUT,QPS_POLL,QPS_DOWNLOAD,
-    UPLOAD_CONCURRENCY, PUT_CONCURRENCY, POLL_CONCURRENCY,FAILED,SPLIT_NEEDED,DOWNLOADING
+    UPLOAD_CONCURRENCY, PUT_CONCURRENCY, POLL_CONCURRENCY,FAILED,SPLIT_NEEDED,DOWNLOADING,MAX_FILE_PAGES
 )
 from db.repository import get_conn,heal_locks
 from core.worker_pool import WorkerPool
 from core.dispatcher import Dispatcher
 from core.rate_limiter import RateLimiter
+from core.quota_manager import ApiQuotaManager
 from core.watchdog import Watchdog
 
-from db.repository import fetch_runnable_tasks, lock_tasks, get_conn
+from db.repository import fetch_runnable_tasks, lock_tasks, unlock_tasks, get_conn
 from utils.logger import logger
+from PyPDF2 import PdfReader
 
 
 class Scheduler:
@@ -25,12 +27,14 @@ class Scheduler:
         self.put_limiter = RateLimiter(QPS_PUT)
         self.poll_limiter = RateLimiter(QPS_POLL)
         self.download_limiter = RateLimiter(QPS_DOWNLOAD)
+        self.quota_manager = ApiQuotaManager()
         self.dispatcher = Dispatcher(
             rate_limiter = self.rate_limiter,
             upload_limiter=self.upload_limiter,
             put_limiter=self.put_limiter,
             poll_limiter=self.poll_limiter,
-            download_limiter=self.download_limiter
+            download_limiter=self.download_limiter,
+            quota_manager=self.quota_manager
         )
         self.rate_limiter.adjust()
         self.priority = SCHEDULER_PRIORITY
@@ -90,6 +94,61 @@ class Scheduler:
             grouped[t.status].append(t)
         return grouped
 
+    def _set_next_run(self, tasks, delay):
+        if not tasks:
+            return
+
+        now = time.time()
+        for t in tasks:
+            t.next_run_time = now + max(1.0, delay)
+            t.locked = 0
+        from db.repository import update_tasks
+        update_tasks(tasks)
+
+    def _read_page_count(self, task):
+        if getattr(task, "page_count", None):
+            return int(task.page_count)
+
+        reader = PdfReader(task.file_path)
+        task.page_count = len(reader.pages)
+        return int(task.page_count)
+
+    def _prepare_init_tasks(self, tasks):
+        ready = []
+        split_needed = []
+        failed = []
+
+        for task in tasks:
+            try:
+                pages = self._read_page_count(task)
+                if pages > MAX_FILE_PAGES:
+                    task.status = "SPLIT_NEEDED"
+                    task.last_error = f"page count {pages} exceeds limit {MAX_FILE_PAGES}"
+                    split_needed.append(task)
+                else:
+                    ready.append(task)
+            except Exception as e:
+                task.status = "FAILED"
+                task.last_error = f"read page count failed: {e}"
+                failed.append(task)
+
+        updates = split_needed + failed
+        if updates:
+            from db.repository import update_tasks
+            update_tasks(updates)
+            logger.info(
+                f"[PAGE-CHECK] split_needed={len(split_needed)} failed={len(failed)}"
+            )
+
+        allowed, deferred, wait = self.quota_manager.reserve_submission_batch(ready)
+        if deferred:
+            self._set_next_run(deferred, wait)
+            logger.info(
+                f"[QUOTA] defer INIT tasks={len(deferred)} wait={wait:.1f}s"
+            )
+
+        return allowed
+
 
 
 
@@ -132,6 +191,7 @@ class Scheduler:
                 tasks = [t for t in tasks if t.id in locked_ids]
 
                 grouped = self._group_tasks(tasks)
+                dispatched_ids = set()
 
                 logger.info(
                     f"[SCHEDULER] fetched={len(tasks)} "
@@ -153,7 +213,7 @@ class Scheduler:
                 }
 
                 total_dispatched = 0
-                MAX_DISPATCH_PER_ROUND = 50   # 🔥 防止一轮打爆线程池
+                MAX_DISPATCH_PER_ROUND = 100   # 🔥 防止一轮打爆线程池
 
                 # =========================
                 # 🔥 无 break + 有序调度
@@ -175,6 +235,10 @@ class Scheduler:
 
                     # 👉 本状态最多处理多少
                     items = items[:limit]
+                    if status == "INIT":
+                        items = self._prepare_init_tasks(items)
+                        if not items:
+                            continue
 
                     logger.info(f"[DISPATCH] {status} -> {len(items)} tasks")
 
@@ -189,21 +253,33 @@ class Scheduler:
                         )
 
                         total_dispatched += len(batch)
+                        dispatched_ids.update(t.id for t in batch)
 
                         # 👉 防止线程池爆掉
                         if total_dispatched >= MAX_DISPATCH_PER_ROUND:
                             break
+
+                undispatched_ids = [
+                    t.id for t in tasks
+                    if t.id not in dispatched_ids and t.status not in ("SPLIT_NEEDED", "FAILED")
+                ]
+                if undispatched_ids:
+                    unlock_tasks(undispatched_ids)
 
                 # =========================
                 # 💓 心跳
                 # =========================
                 now = time.time()
                 if now - self.last_heartbeat > 10:
+                    quota = self.quota_manager.snapshot()
                     logger.info(
                         f"[HEARTBEAT] queue={self.worker_pool.executor._work_queue.qsize()} "
                         f"qps={self.rate_limiter.qps:.2f} "
                         f"success={self.rate_limiter.success} "
-                        f"fail={self.rate_limiter.fail}"
+                        f"fail={self.rate_limiter.fail} "
+                        f"quota_daily_remaining={quota['daily_remaining']} "
+                        f"quota_high_pages_remaining={quota['high_priority_remaining']} "
+                        f"quota_minute_tokens={quota['minute_tokens']}"
                     )
                     self.last_heartbeat = now
 

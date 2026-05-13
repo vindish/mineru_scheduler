@@ -35,27 +35,34 @@ SCAN_DIRS = [
 ]
 
 
+# ========= 官方频控策略（2026-04-15 18:00 生效） =========
+DAILY_FILE_LIMIT = int(os.getenv("MINERU_DAILY_FILE_LIMIT", "5000"))
+MAX_FILE_PAGES = int(os.getenv("MINERU_MAX_FILE_PAGES", "200"))
+HIGH_PRIORITY_DAILY_PAGE_LIMIT = int(os.getenv("MINERU_HIGH_PRIORITY_DAILY_PAGE_LIMIT", "1000"))
+SUBMIT_FILE_RATE_PER_MINUTE = int(os.getenv("MINERU_SUBMIT_FILE_RATE_PER_MINUTE", "50"))
+
+
 # ========= 并发控制 =========
-MAX_WORKERS = 7
-QPS = 0.8
-QPS_UPLOAD=0.08
-QPS_PUT=0.08
-QPS_POLL=0.5
-QPS_DOWNLOAD=0.83
+MAX_WORKERS = 12
+QPS = 2.0
+QPS_UPLOAD=1.0
+QPS_PUT=10.0
+QPS_POLL=15.0
+QPS_DOWNLOAD=5.0
 # =========================
 # 🔥 配额控制（关键）
 # =========================
-UPLOAD_CONCURRENCY = 5
-PUT_CONCURRENCY = 5
-POLL_CONCURRENCY = 5
+UPLOAD_CONCURRENCY = 50
+PUT_CONCURRENCY = 30
+POLL_CONCURRENCY = 20
 FAILED = 5
 SPLIT_NEEDED = 5
-DOWNLOADING = 5
+DOWNLOADING = 20
 
 
 # ========= 调度 =========
-FETCH_LIMIT = 30
-BATCH_SIZE = 5
+FETCH_LIMIT = 200
+BATCH_SIZE = 50
 WATCHDOG_INTERVAL = 60
 
 
@@ -80,7 +87,7 @@ SCHEDULER_PRIORITY = [
 
 
 VALID_TRANSITIONS = {
-    "INIT": ["INIT","UPLOADED", "FAILED"],
+    "INIT": ["INIT","UPLOADED", "SPLIT_NEEDED", "FAILED"],
     "UPLOADED": ["PUT_DONE", "FAILED"],
     "PUT_DONE": [ "DOWNLOADING","FAILED","PUT_DONE"],
     # "POLLING": ["DOWNLOADING", "FAILED", "POLLING","PUT_DONE"],
@@ -110,6 +117,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     error_type TEXT,
     parent_id INTEGER,
     dead_at REAL,
+    page_count INTEGER,
     created_at REAL,
     updated_at REAL
 );
@@ -139,6 +147,7 @@ TASK_COLUMNS = [
     "error_type",
     "parent_id",
     "dead_at",
+    "page_count",
     "created_at",
     "updated_at",
 ]

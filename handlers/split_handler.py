@@ -1,5 +1,6 @@
 # handlers/split_handler.py
 
+from config.settings import MAX_FILE_PAGES
 from db.repository import update_tasks, insert_tasks
 from utils.logger import logger
 from services.storage import Storage
@@ -10,7 +11,7 @@ from pathlib import Path
 
 class SplitHandler:
 
-    def __init__(self, rate_limiter=None, max_pages=200):
+    def __init__(self, rate_limiter=None, max_pages=MAX_FILE_PAGES):
         self.rate_limiter = rate_limiter
         self.storage = Storage()
         self.splitter = PDFSplitter(self.storage,

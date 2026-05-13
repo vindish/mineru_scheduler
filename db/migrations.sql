@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     error_type TEXT,
     parent_id INTEGER,
     dead_at REAL,
+    page_count INTEGER,
     created_at REAL,
     updated_at REAL
 );

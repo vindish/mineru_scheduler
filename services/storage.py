@@ -78,9 +78,21 @@ class Storage:
         stem = re.sub(r"\s+", " ", stem).strip(" ._") or fallback
 
         digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
-        max_len = 160
-        if len(stem) > max_len:
-            stem = stem[:max_len].rstrip(" ._")
+
+        # ⚠️ Linux 单个文件名上限 255 字节。中文 UTF-8 占 3 字节/字符，
+        # 这里必须按 *字节* 裁剪，按字符裁剪会出 [Errno 36] File name too long。
+        # 预算：255 - len("_<8hex>") - len(".zip") - 一些余量(8) = 226 字节
+        MAX_STEM_BYTES = 226
+
+        encoded = stem.encode("utf-8")
+        if len(encoded) > MAX_STEM_BYTES:
+            # 按字节切，但要避免把多字节字符切成乱码
+            cut = encoded[:MAX_STEM_BYTES]
+            try:
+                stem = cut.decode("utf-8")
+            except UnicodeDecodeError:
+                stem = cut.decode("utf-8", errors="ignore")
+            stem = stem.rstrip(" ._") or fallback
 
         return f"{stem}_{digest}"
 

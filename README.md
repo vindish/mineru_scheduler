@@ -7,6 +7,7 @@ MinerU Scheduler 是一个 Docker 化的 MinerU 批量 PDF 解析调度器。它
 cd ~/mineru_scheduler
 git pull   # 或者用你同步代码的方式
 
+docker compose down
 docker compose build --no-cache scheduler
 docker compose up -d --force-recreate scheduler
 
@@ -16,8 +17,29 @@ docker compose logs scheduler --tail 60 | grep -E '📥|来源目录|sample|✅ 
 # 紧接着应该能看到扫描进度，每 500 个 flush 一次
 docker compose logs -f scheduler | grep -E 'SCAN|MONITOR'
 docker compose logs -f scheduler | grep -E 'ERROR|429|warning|FAILED'
-docker compose down
 
+让端口生效得 up -d 一次（端口绑定属于容器创建时的属性，不重建不会出现）：
+
+cd ~/mineru_scheduler
+docker compose up -d --force-recreate postgres
+docker compose ps   # 应该看到 0.0.0.0->/127.0.0.1->5432/tcp
+验证一下能不能从宿主机连：
+
+# 方式 1：psql（如果装了）
+psql -h 127.0.0.1 -p 5432 -U mineru -d mineru_scheduler -c "select count(*) from tasks;"
+
+# 方式 2：用容器里的 psql 临时连一下
+docker run --rm -it --network host postgres:16-alpine \
+  psql -h 127.0.0.1 -p 5432 -U mineru -d mineru_scheduler
+
+# 方式 3：直接在 scheduler 容器里 ping 数据库
+docker compose exec scheduler python -c "from db.repository import get_conn; c=get_conn().cursor(); c.execute('select count(*) from tasks'); print(c.fetchone())"
+几点要点：
+
+默认 127.0.0.1:5432:5432 是“最安全的暴露方式”——宿主机本地工具能连，外部连不上；
+想从公司其他机器连：.env 里改成 POSTGRES_BIND=0.0.0.0，配合防火墙规则只放行可信 IP；
+端口冲突（已经有 PostgreSQL 在跑）：POSTGRES_HOST_PORT=15432 改宿主机端口，容器内仍是 5432，不影响应用配置；
+scheduler 服务本身没有 HTTP/RPC 端口，所以不需要暴露。如果你以后给它加上一个 metrics/health 端口（例如 prometheus_client 起 :9090），照同样的写法在 scheduler: 下加一个 ports: 段就行。
 
 ## 当前目标
 

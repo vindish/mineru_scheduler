@@ -27,6 +27,15 @@ FATAL_KEYWORDS = (
     "file not found",
     "invalid pdf",
     "pdf_invalid",
+    # 本地写盘致命，与 MinerU API 无关，不应再消耗配额
+    "errno 36",
+    "file name too long",
+    "errno 28",
+    "no space left",
+    "errno 13",
+    "permission denied",
+    "errno 30",
+    "read-only file system",
 )
 
 

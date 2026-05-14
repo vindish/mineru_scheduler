@@ -8,6 +8,11 @@ cd ~/mineru_scheduler
 git pull   # 或者用你同步代码的方式
 
 docker compose down
+cd ~/mineru_scheduler
+docker compose down -v        # -v 才会删 postgres_data 数据卷
+docker compose up -d --force-recreate
+docker compose logs -f scheduler --tail 50
+
 docker compose build --no-cache scheduler
 docker compose up -d --force-recreate
 docker compose up -d --force-recreate scheduler

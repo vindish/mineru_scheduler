@@ -12,7 +12,7 @@ services:
     # - 想让其它机器也能连，把 .env 里的 POSTGRES_BIND 改成 0.0.0.0
     # - 想换宿主机端口，改 POSTGRES_HOST_PORT（默认 5432）
     ports:
-      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5435}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

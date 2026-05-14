@@ -1,3 +1,4 @@
+import sys
 import time
 import threading
 
@@ -88,5 +89,12 @@ if __name__ == "__main__":
 
     except Exception:
         logger.exception("❌ 启动失败")
-
-    input("按回车退出...")
+        # 容器里没有 stdin，input() 会立刻 EOFError 并触发重启循环。
+        # 只在明显能交互的本地运行时才等回车，否则直接非零退出，
+        # 让 docker restart 策略接管（默认 unless-stopped 会 backoff 重试）。
+        if sys.stdin and sys.stdin.isatty():
+            try:
+                input("按回车退出...")
+            except EOFError:
+                pass
+        raise SystemExit(1)

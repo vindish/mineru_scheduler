@@ -65,7 +65,29 @@ class Storage:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _safe_stem(self, value, fallback="file"):
+    # 大多数 Linux 文件系统的单文件名字节上限
+    MAX_FS_NAME_BYTES = 255
+
+    @staticmethod
+    def _truncate_utf8(text: str, max_bytes: int) -> str:
+        """按字节裁剪 UTF-8 字符串，避免多字节字符被截断成乱码。"""
+        if max_bytes <= 0:
+            return ""
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        cut = encoded[:max_bytes]
+        try:
+            return cut.decode("utf-8")
+        except UnicodeDecodeError:
+            return cut.decode("utf-8", errors="ignore")
+
+    def _safe_stem(self, value, fallback="file", max_bytes=None):
+        """
+        生成一个安全的文件名 stem（不含扩展名），并保证其 UTF-8 字节数
+        不超过 max_bytes（默认按 255 字节文件名上限做预算，预留 .zip 等）。
+        会尾随一个 8 位 hash 以便区分被截断到同一前缀的不同源文件。
+        """
         raw = str(value or "").strip()
         if not raw:
             return fallback
@@ -78,43 +100,63 @@ class Storage:
         stem = re.sub(r"\s+", " ", stem).strip(" ._") or fallback
 
         digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+        suffix = f"_{digest}"  # 9 字节 (ASCII)
 
-        # ⚠️ Linux 单个文件名上限 255 字节。中文 UTF-8 占 3 字节/字符，
-        # 这里必须按 *字节* 裁剪，按字符裁剪会出 [Errno 36] File name too long。
-        # 预算：255 - len("_<8hex>") - len(".zip") - 一些余量(8) = 226 字节
-        MAX_STEM_BYTES = 226
+        # 默认按文件名上限 255 字节，预留 .zip(4) + 余量(8) + suffix(9) = 25
+        if max_bytes is None:
+            max_bytes = self.MAX_FS_NAME_BYTES - len(suffix) - len(".zip") - 8
 
-        encoded = stem.encode("utf-8")
-        if len(encoded) > MAX_STEM_BYTES:
-            # 按字节切，但要避免把多字节字符切成乱码
-            cut = encoded[:MAX_STEM_BYTES]
-            try:
-                stem = cut.decode("utf-8")
-            except UnicodeDecodeError:
-                stem = cut.decode("utf-8", errors="ignore")
-            stem = stem.rstrip(" ._") or fallback
+        # 至少给 stem 留 8 字节，否则降级成全 hash
+        budget = max(8, max_bytes)
+        stem = self._truncate_utf8(stem, budget).rstrip(" ._") or fallback
 
-        return f"{stem}_{digest}"
+        return f"{stem}{suffix}"
 
-    def get_download_path(self, file_name=None, task_id=None, file_path=None):
+    def get_download_path(self, file_name=None, task_id=None, file_path=None,
+                           max_name_bytes=None):
         """
         下载文件路径（统一规范）
         优先级：task_id > file_path > file_name
+        max_name_bytes：限制 stem 的字节预算，给“缩短重试”用
         """
 
         if task_id:
-            name = self._safe_stem(file_name or file_path or str(task_id), str(task_id))
+            name = self._safe_stem(
+                file_name or file_path or str(task_id),
+                fallback=str(task_id),
+                max_bytes=max_name_bytes,
+            )
             path = self.download_dir / str(task_id) / f"{name}.zip"
-
         elif file_path:
-            name = self._safe_stem(file_path)
+            name = self._safe_stem(file_path, max_bytes=max_name_bytes)
             path = self.download_dir / f"{name}.zip"
         else:
-            name = self._safe_stem(file_name)
+            name = self._safe_stem(file_name, max_bytes=max_name_bytes)
             path = self.download_dir / f"{name}.zip"
 
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def shortened_download_paths(self, file_name=None, task_id=None, file_path=None):
+        """
+        在文件名长度上做几次降级尝试，依次产出候选路径供 caller 重试：
+          1) 默认 stem 字节预算
+          2) 80 字节
+          3) 32 字节
+          4) 8 字节（基本只剩 hash 8 位 + suffix）
+        每个候选都自带不同长度 stem 的 hash 后缀，所以不会撞名。
+        """
+        # 第 1 个就是默认的，与 get_download_path 完全一致
+        yield self.get_download_path(
+            file_name=file_name, task_id=task_id, file_path=file_path
+        )
+        for budget in (80, 32, 8):
+            yield self.get_download_path(
+                file_name=file_name,
+                task_id=task_id,
+                file_path=file_path,
+                max_name_bytes=budget,
+            )
 
     def get_output_path(self, file_name, task_id=None):
         """

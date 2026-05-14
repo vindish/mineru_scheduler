@@ -4,7 +4,13 @@ from pathlib import Path
 
 from psycopg2.extras import execute_values
 
-from config.settings import SCAN_INTERVAL, SCAN_MAX_FILES, SCAN_BATCH_SLEEP
+from config.settings import (
+    SCAN_INTERVAL,
+    SCAN_MAX_FILES,
+    SCAN_BATCH_SLEEP,
+    SCAN_BACKLOG_HIGH,
+    SCAN_BACKLOG_LOW,
+)
 from utils.logger import logger
 from db.repository import get_conn
 from services.storage import Storage
@@ -13,6 +19,30 @@ from services.storage import Storage
 # 每批向数据库 flush 的条数。在大 NAS 上必须分批 flush，
 # 否则一次性遍历完所有文件再写库，调度器要等很久才能拿到任务。
 SCAN_FLUSH_BATCH = 500
+
+
+# 还没处理完的任务（scheduler 在跑或待跑）。
+# DOWNLOADED / DEAD / SPLIT_DONE 都算“已离场”不算 backlog。
+ACTIVE_STATUSES = (
+    "INIT",
+    "UPLOADED",
+    "PUT_DONE",
+    "DOWNLOADING",
+    "FAILED",
+    "SPLIT_NEEDED",
+)
+
+
+def get_active_backlog() -> int:
+    """返回当前 tasks 表里‘还需要处理’的任务总数。"""
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) AS c FROM tasks WHERE status = ANY(%s)",
+        (list(ACTIVE_STATUSES),),
+    )
+    row = cursor.fetchone()
+    return int(row["c"] if row else 0)
 
 
 def _walk_pdfs(base: Path):
@@ -70,7 +100,13 @@ def _flush(conn, cursor, rows):
     return inserted
 
 
-def scan_and_insert():
+def scan_and_insert(stop_when_backlog_above: int = SCAN_BACKLOG_HIGH):
+    """
+    扫一轮 PDF：
+      - 边走边批量入库（每 SCAN_FLUSH_BATCH 条 flush 一次），让调度器尽快开工
+      - 每次 flush 后查 backlog；超过 stop_when_backlog_above 就主动停，
+        避免一次性把几十万 PDF 灌进数据库
+    """
     storage = Storage()
     scan_dirs = storage.get_scan_dirs()
 
@@ -80,8 +116,12 @@ def scan_and_insert():
     scanned = 0
     inserted_total = 0
     batch = []
+    aborted_by_backlog = False
 
     for scan_dir in scan_dirs:
+        if aborted_by_backlog:
+            break
+
         base = Path(scan_dir)
 
         if not base.exists():
@@ -104,11 +144,24 @@ def scan_and_insert():
             if len(batch) >= SCAN_FLUSH_BATCH:
                 ins = _flush(conn, cursor, batch)
                 inserted_total += ins
+                batch.clear()
+
+                # 检查 backlog 水位：超了就停，剩下的留给下一轮
+                backlog = get_active_backlog()
                 logger.info(
                     f"[SCAN] progress scanned={scanned} "
-                    f"inserted_total={inserted_total} (this batch={ins})"
+                    f"inserted_total={inserted_total} (this batch={ins}) "
+                    f"backlog={backlog}"
                 )
-                batch.clear()
+
+                if backlog >= stop_when_backlog_above:
+                    logger.info(
+                        f"[SCAN] backlog={backlog} 已达高水位 "
+                        f"{stop_when_backlog_above}，本轮提前结束，等下一轮"
+                    )
+                    aborted_by_backlog = True
+                    break
+
                 # 节流，避免猛拍数据库
                 time.sleep(SCAN_BATCH_SLEEP)
 
@@ -131,4 +184,7 @@ def scan_and_insert():
     if scanned == 0:
         logger.info("[SCAN] 无文件（来源目录为空或全部跳过）")
     else:
-        logger.info(f"[SCAN] done scanned={scanned} inserted_total={inserted_total}")
+        logger.info(
+            f"[SCAN] done scanned={scanned} inserted_total={inserted_total} "
+            f"aborted_by_backlog={aborted_by_backlog}"
+        )

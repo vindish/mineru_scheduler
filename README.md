@@ -9,7 +9,10 @@ git pull   # 或者用你同步代码的方式
 
 docker compose down
 docker compose build --no-cache scheduler
+docker compose up -d --force-recreate
 docker compose up -d --force-recreate scheduler
+docker compose up -d --force-recreate postgres
+docker compose up -d --force-recreate scheduler postgres
 
 # 启动自检几毫秒就过（不再递归数 PDF）
 docker compose logs scheduler --tail 60 | grep -E '📥|来源目录|sample|✅ 配置检查'

@@ -161,6 +161,12 @@ SCAN_INTERVAL = 60          # 基础扫描间隔（秒）
 SCAN_MAX_FILES = 200000     # 每次最多扫描多少文件（防止卡死）
 SCAN_BATCH_SLEEP = 0.01     # 扫描过程中微暂停（防 CPU 飙升）
 
+# 扫描水位线（回压控制，避免一次性把 NAS 上的几十万 PDF 全塞进库）
+# 队列“在跑/待跑”的任务数 > HIGH 时，scan 暂停一轮
+# 队列“在跑/待跑”的任务数 < LOW 时，恢复扫描
+SCAN_BACKLOG_HIGH = 2000
+SCAN_BACKLOG_LOW = 500
+
 
 SCHEDULER_PRIORITY = [
     "FAILED",

@@ -154,8 +154,8 @@ class ApiQuotaManager:
                 (quota_date, daily_files, high_priority_pages, updated_at)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT(quota_date) DO UPDATE SET
-                    daily_files = daily_files + excluded.daily_files,
-                    high_priority_pages = high_priority_pages + excluded.high_priority_pages,
+                    daily_files = api_quota_usage.daily_files + excluded.daily_files,
+                    high_priority_pages = api_quota_usage.high_priority_pages + excluded.high_priority_pages,
                     updated_at = excluded.updated_at
                 """,
                 (quota_date, files, high_pages, time.time()),

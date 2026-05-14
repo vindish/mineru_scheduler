@@ -43,8 +43,8 @@ class Storage:
         self.temp_dir = TEMP_DIR
         self.split_dir = SPLIT_DIR
 
-        # 兜底确保目录存在（settings 中已建过，这里再保一次幂等）
-        for d in [self.pdf_dir, self.download_dir, self.output_dir,
+        # 兜底确保“输出”目录存在（输入目录不能在这里创建，原因见 settings.py）
+        for d in [self.download_dir, self.output_dir,
                   self.temp_dir, self.split_dir]:
             d.mkdir(parents=True, exist_ok=True)
 

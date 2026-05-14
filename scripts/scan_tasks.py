@@ -6,6 +6,17 @@ from utils.logger import logger
 from db.repository import get_conn
 from services.storage import Storage
 
+
+def _iter_pdfs(base: Path):
+    """大小写不敏感地遍历 *.pdf / *.PDF / *.Pdf 等。"""
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() != ".pdf":
+            continue
+        yield path
+
+
 def scan_and_insert():
     storage = Storage()
     scan_dirs = storage.get_scan_dirs()
@@ -20,15 +31,31 @@ def scan_and_insert():
         base = Path(scan_dir)
 
         if not base.exists():
-            logger.info(f"[SCAN] 目录不存在: {base}")
+            logger.warning(
+                f"[SCAN] 目录不存在，已跳过（不会自动创建以防屏蔽 NAS 挂载）: {base}"
+            )
             continue
 
-        for path in base.rglob("*.pdf"):
-            p = str(path.resolve())   # 🔥 统一绝对路径
+        if not base.is_dir():
+            logger.warning(f"[SCAN] 不是目录，已跳过: {base}")
+            continue
+
+        try:
+            iterator = _iter_pdfs(base)
+        except PermissionError as e:
+            logger.error(f"[SCAN] 无权限读取 {base}: {e}")
+            continue
+
+        for path in iterator:
+            try:
+                p = str(path.resolve())
+            except OSError as e:
+                logger.warning(f"[SCAN] resolve 失败已跳过: {path} ({e})")
+                continue
 
             scanned += 1
 
-            new_files.append((p, Path(p).name))
+            new_files.append((p, path.name))
 
             # 🔥 扫描上限（正确 break）
             if scanned >= SCAN_MAX_FILES:
@@ -48,7 +75,6 @@ def scan_and_insert():
 
     now = time.time()
 
-    # 🔥 直接交给数据库去重
     inserted = 0
     for p, name in new_files:
         cursor.execute("""

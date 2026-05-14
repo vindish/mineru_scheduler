@@ -20,7 +20,10 @@ def get_conn():
             conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         else:
             conn = psycopg2.connect(cursor_factory=RealDictCursor, **PG_CONN_KWARGS)
-        conn.autocommit = False
+        # Autocommit mode: every statement is its own transaction. This avoids
+        # "InFailedSqlTransaction" cascading errors when one statement fails
+        # mid-batch on a long-lived thread-local connection.
+        conn.autocommit = True
         _local.conn = conn
     return _local.conn
 
@@ -252,14 +255,23 @@ def update_tasks(updates):
             fields = []
             values = []
 
+            # Skip columns we always overwrite below to avoid duplicate
+            # assignments. Handlers commonly set `locked = 0` redundantly;
+            # `updated_at` is always stamped here; the row id is the WHERE key.
+            reserved = {"id", "locked", "locked_at", "updated_at"}
+            seen = set()
             for k, v in u.items():
-                if k == "id":
+                if k in reserved or k in seen:
                     continue
+                seen.add(k)
                 fields.append(f"{k} = %s")
                 values.append(v)
 
-            fields.append("locked = 0")
-            fields.append("locked_at = NULL")
+            # always release the lock and stamp updated_at
+            fields.append("locked = %s")
+            values.append(0)
+            fields.append("locked_at = %s")
+            values.append(None)
             fields.append("updated_at = %s")
             values.append(time.time())
             values.append(task_id)

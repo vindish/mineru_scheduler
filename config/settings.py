@@ -78,7 +78,10 @@ LOG_DIR = Path(
     os.getenv("LOG_DIR") or str(BASE_DIR / "logs")
 ).expanduser().resolve()
 
-# 启动期保证目录存在（不存在则创建；已存在不会报错）
+# 启动期保证“输出类”目录存在（不存在则创建；已存在不会报错）
+# ⚠️ 注意：PDF_INPUT_DIRS 是“输入”，绝对不要在这里 mkdir。
+# 否则在容器里、NAS 还没挂上时会创建一个本地空目录，
+# 既扫不出文件，又会屏蔽后续真实挂载。
 for _d in (BASE_DIR, OUTPUT_BASE_DIR, DOWNLOAD_DIR, OUTPUT_DIR,
            SPLIT_DIR, TEMP_DIR, LOG_DIR):
     _d.mkdir(parents=True, exist_ok=True)

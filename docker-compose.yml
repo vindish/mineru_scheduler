@@ -26,6 +26,9 @@ services:
       MINERU_TOKEN: ${MINERU_TOKEN}
       # 统一路径配置（详见 config/settings.py）
       BASE_DIR: /app/data
+      # 容器内 PDF 来源目录；默认指向 /app/data/pdf（即 ./data/pdf 挂载）
+      # 若要从宿主机其它路径（如 NAS）扫描，配合下面 PDF_INPUT_HOST_DIR
+      # 把宿主机目录挂进容器到 /app/input，并把 PDF_INPUT_DIRS 设成 /app/input
       PDF_INPUT_DIRS: ${PDF_INPUT_DIRS:-/app/data/pdf}
       OUTPUT_BASE_DIR: ${OUTPUT_BASE_DIR:-/app/data}
       POSTGRES_HOST: postgres
@@ -38,7 +41,20 @@ services:
       MINERU_HIGH_PRIORITY_DAILY_PAGE_LIMIT: ${MINERU_HIGH_PRIORITY_DAILY_PAGE_LIMIT:-1000}
       MINERU_SUBMIT_FILE_RATE_PER_MINUTE: ${MINERU_SUBMIT_FILE_RATE_PER_MINUTE:-50}
     volumes:
-      - ./data:/app/data
+      - type: bind
+        source: ./data
+        target: /app/data
+      # 可选：把宿主机的 PDF 来源（如 NAS 挂载点）映射进容器
+      # 在 .env 中设置 PDF_INPUT_HOST_DIR=/mnt/nas/Study
+      # 然后把 PDF_INPUT_DIRS 设成 /app/input 即可
+      # bind.create_host_path=false：宿主机源不存在时直接报错，
+      # 防止 docker 默默建一个空目录把问题藏起来。
+      - type: bind
+        source: ${PDF_INPUT_HOST_DIR:-./data/pdf}
+        target: /app/input
+        read_only: true
+        bind:
+          create_host_path: false
 
 volumes:
   postgres_data:

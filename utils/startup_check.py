@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from config.settings import (
     TOKEN,
@@ -20,15 +21,21 @@ def _looks_like_mountpoint(p: Path) -> bool:
     return any(seg in s for seg in ("/mnt/", "/media/", "/nfs/", "/nas/", "/share"))
 
 
-def _count_pdfs(base: Path) -> int:
-    n = 0
+def _probe_readable(base: Path):
+    """
+    只确认目录可读、且能取到至少一个 dirent，不递归数 PDF 数量。
+    递归数文件在大 NAS 上动辄几分钟到几小时，会把启动卡住。
+    返回值: (ok: bool, sample: str|None, err: str|None)
+    """
     try:
-        for path in base.rglob("*"):
-            if path.is_file() and path.suffix.lower() == ".pdf":
-                n += 1
-    except PermissionError:
-        return -1
-    return n
+        with os.scandir(base) as it:
+            for entry in it:
+                return True, entry.name, None
+        return True, None, None  # 目录存在但是空的
+    except PermissionError as e:
+        return False, None, f"PermissionError: {e}"
+    except OSError as e:
+        return False, None, f"OSError: {e}"
 
 
 def run_checks():
@@ -50,7 +57,6 @@ def run_checks():
         raise RuntimeError("❌ PDF 来源目录未配置（settings.PDF_INPUT_DIRS 为空）")
 
     logger.info(f"📥 PDF 来源目录（共 {len(PDF_INPUT_DIRS)} 个）:")
-    total_pdf = 0
     missing = []
     for d in PDF_INPUT_DIRS:
         if not d.exists():
@@ -64,22 +70,20 @@ def run_checks():
             missing.append(d)
             continue
 
-        cnt = _count_pdfs(d)
-        if cnt < 0:
-            logger.error(f"  - 无权限读取: {d}")
+        ok, sample, err = _probe_readable(d)
+        if not ok:
+            logger.error(f"  - 不可读: {d} {err}")
             missing.append(d)
             continue
-        total_pdf += cnt
-        logger.info(f"  - {d}  (PDF 数量: {cnt})")
+
+        sample_hint = f"sample: {sample!r}" if sample else "目录为空"
+        logger.info(f"  - {d}  ({sample_hint})")
 
     if missing and len(missing) == len(PDF_INPUT_DIRS):
         # 全部不可用，直接拒绝启动，避免无意义空转
         raise RuntimeError(
             f"❌ 所有 PDF 来源目录都不可用，启动终止。请检查 PDF_INPUT_DIRS 与挂载配置：{missing}"
         )
-
-    if total_pdf == 0:
-        logger.warning("⚠️ 来源目录中暂未发现 PDF，调度器仍会启动并等待新文件。")
 
     # =========================
     # 📤 输出目录检查

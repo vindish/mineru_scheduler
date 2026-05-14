@@ -4,6 +4,21 @@ MinerU Scheduler 是一个 Docker 化的 MinerU 批量 PDF 解析调度器。它
 
 本版本已移除 SQLite 依赖，数据库改为 PostgreSQL，避免 NAS 文件锁、WAL、网络文件系统一致性导致的 SQLite 报错。
 
+cd ~/mineru_scheduler
+git pull   # 或者用你同步代码的方式
+
+docker compose build --no-cache scheduler
+docker compose up -d --force-recreate scheduler
+
+# 启动自检几毫秒就过（不再递归数 PDF）
+docker compose logs scheduler --tail 60 | grep -E '📥|来源目录|sample|✅ 配置检查'
+
+# 紧接着应该能看到扫描进度，每 500 个 flush 一次
+docker compose logs -f scheduler | grep -E 'SCAN|MONITOR'
+docker compose logs -f scheduler | grep -E 'ERROR|429|warning|FAILED'
+docker compose down
+
+
 ## 当前目标
 
 在本地可恢复、可观测、可限速的前提下，尽量贴近 MinerU 官方频控上限运行：

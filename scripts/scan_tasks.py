@@ -49,19 +49,18 @@ def scan_and_insert():
     now = time.time()
 
     # 🔥 直接交给数据库去重
-    cursor.executemany("""
-        INSERT OR IGNORE INTO tasks 
-        (file_path, file_name, status, created_at)
-        VALUES (?, ?, 'INIT', ?)
-    """, [
-        (p, name, now)
-        for p, name in new_files
-    ])
+    inserted = 0
+    for p, name in new_files:
+        cursor.execute("""
+            INSERT INTO tasks
+            (file_path, file_name, status, created_at)
+            VALUES (%s, %s, 'INIT', %s)
+            ON CONFLICT (file_path) DO NOTHING
+            RETURNING id
+        """, (p, name, now))
+        if cursor.fetchone():
+            inserted += 1
 
     conn.commit()
 
-    inserted = cursor.rowcount  # ⚠️ SQLite 不完全准确，但可参考
-
-    logger.info(f"[SCAN] scanned={scanned} inserted≈{inserted}")
-
-
+    logger.info(f"[SCAN] scanned={scanned} inserted={inserted}")

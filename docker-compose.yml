@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mineru_scheduler_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mineru_scheduler}
+      POSTGRES_USER: ${POSTGRES_USER:-mineru}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mineru_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mineru} -d ${POSTGRES_DB:-mineru_scheduler}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  scheduler:
+    build: .
+    container_name: mineru_scheduler_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MINERU_TOKEN: ${MINERU_TOKEN}
+      # 统一路径配置（详见 config/settings.py）
+      BASE_DIR: /app/data
+      PDF_INPUT_DIRS: ${PDF_INPUT_DIRS:-/app/data/pdf}
+      OUTPUT_BASE_DIR: ${OUTPUT_BASE_DIR:-/app/data}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-mineru_scheduler}
+      POSTGRES_USER: ${POSTGRES_USER:-mineru}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mineru_password}
+      MINERU_DAILY_FILE_LIMIT: ${MINERU_DAILY_FILE_LIMIT:-5000}
+      MINERU_MAX_FILE_PAGES: ${MINERU_MAX_FILE_PAGES:-200}
+      MINERU_HIGH_PRIORITY_DAILY_PAGE_LIMIT: ${MINERU_HIGH_PRIORITY_DAILY_PAGE_LIMIT:-1000}
+      MINERU_SUBMIT_FILE_RATE_PER_MINUTE: ${MINERU_SUBMIT_FILE_RATE_PER_MINUTE:-50}
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  postgres_data:

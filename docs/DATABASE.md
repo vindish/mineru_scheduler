@@ -1,63 +1,63 @@
 # Database
 
-The project uses SQLite with WAL mode. The database path is built by `services/storage.py`:
+The project uses PostgreSQL through `psycopg2`. SQLite has been removed because the previous DB file lived on NAS and caused reliability issues.
 
-```text
-BASE_DIR / "db" / DB_NAME
-```
-
-Current default database name:
-
-```text
-tasks1.db
-```
-
-## Connection Setup
+## Connection
 
 Owner: `db/repository.py:get_conn()`
 
-Each thread gets its own SQLite connection through `threading.local()`.
+Connection priority:
 
-Pragmas:
+1. `DATABASE_URL`, if set.
+2. `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
 
-```sql
-PRAGMA temp_store=MEMORY;
-PRAGMA cache_size=-10000;
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
+Cursor type:
+
+```text
+psycopg2.extras.RealDictCursor
 ```
 
-Python-level writes are protected by `db_lock = threading.Lock()`.
+Each Python thread uses a thread-local connection.
+
+## Schema Init
+
+Runtime initialization:
+
+```text
+main.py -> init_db() -> ensure_schema()
+```
+
+Reference SQL:
+
+```text
+db/migrations.sql
+```
 
 ## Table: tasks
 
-Primary task table.
-
-### Columns
-
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Task id. |
-| `file_path` | `TEXT` | Absolute PDF path; unique. |
-| `file_name` | `TEXT` | Display/file match name. |
+| `id` | `BIGSERIAL PRIMARY KEY` | Task id. |
+| `file_path` | `TEXT` | Absolute PDF path; unique index. |
+| `file_name` | `TEXT` | File name used for MinerU result matching. |
 | `status` | `TEXT` | State machine status. |
 | `api_task_id` | `TEXT` | MinerU batch id. |
 | `upload_url` | `TEXT` | MinerU/OSS upload URL. |
 | `zip_url` | `TEXT` | Result ZIP URL. |
 | `retry_count` | `INTEGER DEFAULT 0` | Retry count. |
 | `max_retry` | `INTEGER DEFAULT 5` | Per-task max retry field. |
-| `next_run_time` | `REAL` | Unix timestamp before which scheduler should skip the task. |
+| `next_run_time` | `DOUBLE PRECISION` | Unix timestamp for delayed scheduling. |
 | `locked` | `INTEGER DEFAULT 0` | Scheduler lock flag. |
-| `locked_at` | `INTEGER` | Lock timestamp. |
-| `last_error` | `TEXT` | Latest error message. |
-| `error_type` | `TEXT` | Dead-letter or categorized error. |
-| `parent_id` | `INTEGER` | Parent task id for split child PDFs. |
-| `dead_at` | `REAL` | Unix timestamp when task entered `DEAD`. |
+| `locked_at` | `BIGINT` | Lock timestamp. |
+| `last_error` | `TEXT` | Latest error. |
+| `error_type` | `TEXT` | Error category, especially for dead letter. |
+| `parent_id` | `BIGINT` | Parent task id for split children. |
+| `dead_at` | `DOUBLE PRECISION` | Unix timestamp when moved to `DEAD`. |
 | `page_count` | `INTEGER` | Cached PDF page count. |
-| `created_at` | `REAL` | Created timestamp. |
-| `updated_at` | `REAL` | Last update timestamp. |
+| `created_at` | `DOUBLE PRECISION` | Created timestamp. |
+| `updated_at` | `DOUBLE PRECISION` | Last update timestamp. |
 
-### Indexes
+Indexes:
 
 ```sql
 CREATE INDEX IF NOT EXISTS idx_status ON tasks(status);
@@ -69,146 +69,112 @@ CREATE INDEX IF NOT EXISTS idx_parent_id ON tasks(parent_id);
 
 ## Table: api_quota_usage
 
-Created by `core/quota_manager.py`.
-
-Tracks MinerU daily quota usage.
-
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `quota_date` | `TEXT PRIMARY KEY` | Local date in `YYYY-MM-DD`. |
-| `daily_files` | `INTEGER DEFAULT 0` | Submitted files counted for the day. |
-| `high_priority_pages` | `INTEGER DEFAULT 0` | Locally counted high-priority pages. |
-| `updated_at` | `REAL` | Last update timestamp. |
+| `quota_date` | `TEXT PRIMARY KEY` | Local date `YYYY-MM-DD`. |
+| `daily_files` | `INTEGER DEFAULT 0` | Committed submitted file count. |
+| `high_priority_pages` | `INTEGER DEFAULT 0` | Local high-priority page count. |
+| `updated_at` | `DOUBLE PRECISION` | Last update timestamp. |
 
-Important:
+Quota is committed only after MinerU upload batch creation succeeds.
 
-- `daily_files` increments only after `UploadHandler` successfully creates an upload batch.
-- Pending reservations live in memory and are not written until commit.
-- Failed upload batch reservations are released and never committed.
+## PostgreSQL Query Conventions
 
-## Schema Initialization And Migration
-
-Initial schema is duplicated in:
-
-- `config/settings.py:INIT_SQL`
-- `db/migrations.sql`
-
-Runtime migration is handled by:
-
-```text
-db.repository.ensure_schema()
-```
-
-When adding a new task column:
-
-1. Add it to `INIT_SQL`.
-2. Add it to `TASK_COLUMNS`.
-3. Add an idempotent migration in `ensure_schema()`.
-4. Add it to `db/migrations.sql`.
-5. Update this document.
-
-## TaskRow Column Order
-
-`TaskRow` can build from raw tuples using `TASK_COLUMNS`, so column order must match the task table when raw non-row tuples are used.
-
-Most current queries use `sqlite3.Row`, but still keep `TASK_COLUMNS` accurate.
-
-## Locking Model
-
-Runnable tasks are selected by:
+Use:
 
 ```sql
-SELECT * FROM tasks
-WHERE locked = 0
-AND status NOT IN ('DEAD', 'DOWNLOADED', 'SPLIT_DONE')
-AND (next_run_time IS NULL OR next_run_time <= ?)
-LIMIT ?
+WHERE id = %s
+WHERE id = ANY(%s)
+ON CONFLICT (file_path) DO NOTHING
+RETURNING id
 ```
 
-Lock acquisition:
+Do not use:
+
+```sql
+?
+INSERT OR IGNORE
+AUTOINCREMENT
+```
+
+## Locking
+
+Fetch:
+
+```sql
+SELECT *
+FROM tasks
+WHERE locked = 0
+AND status NOT IN ('DEAD', 'DOWNLOADED', 'SPLIT_DONE')
+AND (next_run_time IS NULL OR next_run_time <= %s)
+ORDER BY id
+LIMIT %s;
+```
+
+Lock:
 
 ```sql
 UPDATE tasks
-SET locked=1, locked_at=?
-WHERE id IN (...)
-AND locked=0
+SET locked = 1, locked_at = %s
+WHERE id = ANY(%s)
+AND locked = 0
+RETURNING id;
 ```
 
-After the update, the repository queries back the locked ids for the same `locked_at`.
+Unlock:
 
-Unlock happens through either:
-
-- `update_tasks()`: normal handler completion.
-- `unlock_tasks()`: dispatch errors or locked-but-not-dispatched tasks.
-- `heal_locks()`: watchdog timeout cleanup.
+```sql
+UPDATE tasks
+SET locked = 0, locked_at = NULL, updated_at = %s
+WHERE id = ANY(%s);
+```
 
 ## State Validation
 
-`update_tasks()` reads the current persisted status, compares requested new status against `VALID_TRANSITIONS`, and skips invalid transitions.
+`update_tasks()` reads the current persisted status, validates requested new status against `VALID_TRANSITIONS`, and skips invalid updates.
 
 If logs contain:
 
 ```text
-[INVALID TRANSITION] OLD -> NEW
+[INVALID TRANSITION] OLD → NEW
 ```
 
-then update `config/settings.py:VALID_TRANSITIONS` only if the transition is actually valid.
+fix the handler or add the transition only if the lifecycle truly allows it.
 
-## Useful SQL
+## Useful psql Commands
 
-Counts by status:
+Task counts:
 
-```sql
-SELECT status, COUNT(*) AS count
-FROM tasks
-GROUP BY status
-ORDER BY count DESC;
+```bash
+docker compose exec postgres psql -U mineru -d mineru_scheduler \
+  -c "SELECT status, COUNT(*) FROM tasks GROUP BY status ORDER BY COUNT(*) DESC;"
+```
+
+Quota:
+
+```bash
+docker compose exec postgres psql -U mineru -d mineru_scheduler \
+  -c "SELECT * FROM api_quota_usage ORDER BY quota_date DESC LIMIT 5;"
 ```
 
 Locked tasks:
 
-```sql
-SELECT id, status, locked_at, file_name
-FROM tasks
-WHERE locked=1
-ORDER BY locked_at;
+```bash
+docker compose exec postgres psql -U mineru -d mineru_scheduler \
+  -c "SELECT id, status, locked_at, file_name FROM tasks WHERE locked=1 ORDER BY locked_at;"
 ```
 
 Recent failures:
 
-```sql
-SELECT id, status, retry_count, file_name, last_error
-FROM tasks
-WHERE status='FAILED'
-ORDER BY updated_at DESC
-LIMIT 50;
+```bash
+docker compose exec postgres psql -U mineru -d mineru_scheduler \
+  -c "SELECT id, retry_count, file_name, left(last_error, 200) FROM tasks WHERE status='FAILED' ORDER BY updated_at DESC LIMIT 20;"
 ```
 
-Quota usage:
+## Schema Change Checklist
 
-```sql
-SELECT *
-FROM api_quota_usage
-ORDER BY quota_date DESC
-LIMIT 10;
-```
-
-Tasks waiting for future retry/quota:
-
-```sql
-SELECT id, status, datetime(next_run_time, 'unixepoch') AS next_run, file_name
-FROM tasks
-WHERE next_run_time IS NOT NULL
-AND next_run_time > strftime('%s', 'now')
-ORDER BY next_run_time
-LIMIT 50;
-```
-
-Split parent/child relation:
-
-```sql
-SELECT p.id AS parent_id, p.file_name AS parent_file, c.id AS child_id, c.file_name AS child_file, c.status
-FROM tasks p
-JOIN tasks c ON c.parent_id = p.id
-WHERE p.id = ?;
-```
+1. Update `db/repository.py:init_db()`.
+2. Add idempotent migration to `db/repository.py:ensure_schema()`.
+3. Update `config/settings.py:TASK_COLUMNS` if the field belongs to `TaskRow`.
+4. Update `db/migrations.sql`.
+5. Update this document.

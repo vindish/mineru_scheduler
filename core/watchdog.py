@@ -27,40 +27,20 @@ class Watchdog:
                 conn = get_conn()
                 cursor = conn.cursor()
                 cursor.execute("""
-                                    SELECT COUNT(*) 
-                                    FROM tasks 
-                                    WHERE locked=1
-                                """)
-                locked_total = cursor.fetchone()[0]
+                    SELECT COUNT(*) AS count
+                    FROM tasks
+                    WHERE locked=1
+                """)
+                locked_total = cursor.fetchone()["count"]
 
                 logger.info(f"[WATCHDOG] locked_total={locked_total}")
                 
                 unlock, broken = heal_locks(timeout=300)
-                logger.info(
-                f"[WATCHDOG] unlock={unlock} broken={broken}"
-                            )
+                logger.info(f"[WATCHDOG] unlock={unlock} broken={broken}")
 
                 logger.info("[WATCHDOG] running")
-
-                # now = int(time.time())
-
-                # cursor.execute("""
-                #     UPDATE tasks
-                #     SET locked=0
-                #     WHERE locked=1 AND (? - locked_at > 300)
-                # """, (now,))
-
-                # cursor.execute("""
-                #     UPDATE tasks
-                #     SET status='FAILED'
-                #     WHERE status='POLLING'
-                #     AND strftime('%s','now') - locked_at > 600
-                # """)
-
-                # conn.commit()
 
             except Exception:
                 logger.exception("[WATCHDOG ERROR]")
 
             time.sleep(self.interval)
-            # time.sleep(60)

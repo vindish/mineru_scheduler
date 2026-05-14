@@ -39,3 +39,4 @@ node_modules/
 
 # 配置文件
 .env
+.env.example

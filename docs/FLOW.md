@@ -1,109 +1,96 @@
 # Task Flow
 
-This document describes the task lifecycle at the level needed to debug or modify the scheduler.
+This document describes the PostgreSQL-backed task lifecycle.
 
 ## Happy Path
 
 ```text
-PDF on disk
+PDF file in /app/data/pdf
   -> scan_and_insert()
-  -> tasks row with status INIT
-  -> Scheduler locks row
-  -> Scheduler reads page_count
-  -> Scheduler reserves MinerU quota
-  -> UploadHandler.create_upload_batch()
-  -> status UPLOADED
-  -> PutHandler.upload_file()
-  -> status PUT_DONE
-  -> PollHandler.poll_batch()
-  -> status DOWNLOADING when MinerU state is done
-  -> DownloadHandler.download_stream()
-  -> status DOWNLOADED
+  -> INSERT tasks(status='INIT') ON CONFLICT DO NOTHING
+  -> Scheduler fetches runnable tasks
+  -> Scheduler locks rows in PostgreSQL
+  -> Scheduler checks page_count and reserves quota
+  -> UploadHandler creates MinerU upload batch
+  -> UPLOADED
+  -> PutHandler PUTs file bytes
+  -> PUT_DONE
+  -> PollHandler polls MinerU batch
+  -> DOWNLOADING
+  -> DownloadHandler downloads ZIP
+  -> DOWNLOADED
 ```
 
-## Scan Stage
+## Scan
 
 Owner: `scripts/scan_tasks.py`
 
 Behavior:
 
-- Reads directories from `Storage.get_scan_dirs()`.
-- Recursively finds `*.pdf`.
-- Converts file paths to absolute paths.
-- Inserts `file_path`, `file_name`, `status='INIT'`, `created_at`.
-- Uses `INSERT OR IGNORE`, relying on the unique `file_path` index.
+- Reads `SCAN_DIRS`.
+- Finds `*.pdf` recursively.
+- Inserts absolute file paths into PostgreSQL.
+- Uses `ON CONFLICT (file_path) DO NOTHING` for idempotency.
 
-Important settings:
-
-- `SCAN_DIRS`
-- `SCAN_INTERVAL`
-- `SCAN_MAX_FILES`
-- `SCAN_BATCH_SLEEP`
-
-## Scheduling Stage
-
-Owner: `core/scheduler.py`
-
-Each loop:
-
-1. `fetch_runnable_tasks(FETCH_LIMIT)` returns unlocked, non-terminal tasks whose `next_run_time` is due.
-2. `lock_tasks()` marks candidate rows as locked.
-3. Tasks are grouped by `status`.
-4. Status groups are processed in `SCHEDULER_PRIORITY` order.
-5. Per-status limits are applied.
-6. For `INIT`, `_prepare_init_tasks()` runs page and quota checks.
-7. Batches are submitted to `WorkerPool`.
-8. Locked but undispatched tasks are unlocked.
-
-Current priority:
+Inserted fields:
 
 ```text
-FAILED
-SPLIT_NEEDED
-DOWNLOADING
-PUT_DONE
-UPLOADED
-INIT
+file_path
+file_name
+status = INIT
+created_at
 ```
 
-This means cleanup and continuation work run before new submissions.
+## Fetch And Lock
+
+Owner: `db/repository.py`
+
+Runnable query:
+
+```sql
+SELECT *
+FROM tasks
+WHERE locked = 0
+AND status NOT IN ('DEAD', 'DOWNLOADED', 'SPLIT_DONE')
+AND (next_run_time IS NULL OR next_run_time <= %s)
+ORDER BY id
+LIMIT %s;
+```
+
+Lock query:
+
+```sql
+UPDATE tasks
+SET locked = 1, locked_at = %s
+WHERE id = ANY(%s)
+AND locked = 0
+RETURNING id;
+```
+
+Only returned ids are considered locked by this scheduler loop.
 
 ## INIT Preparation
 
-Owner: `Scheduler._prepare_init_tasks()`
+Owner: `core/scheduler.py:_prepare_init_tasks()`
 
 For each `INIT` task:
 
-1. Read `page_count` from row if already set.
-2. Otherwise load the PDF with PyPDF2 and count pages.
-3. If pages exceed `MAX_FILE_PAGES`, set:
+1. Use cached `page_count` if present.
+2. Otherwise read PDF page count with PyPDF2.
+3. If pages exceed `MAX_FILE_PAGES`, move to `SPLIT_NEEDED`.
+4. If PDF reading fails, move to `FAILED`.
+5. For valid files, reserve quota through `ApiQuotaManager`.
+6. If quota is unavailable, set `next_run_time` and unlock.
 
-```text
-status = SPLIT_NEEDED
-last_error = "page count ... exceeds limit ..."
-```
+Only quota-approved tasks are dispatched to `UploadHandler`.
 
-4. If page count fails, set:
-
-```text
-status = FAILED
-last_error = "read page count failed: ..."
-```
-
-5. For valid PDFs, call `ApiQuotaManager.reserve_submission_batch()`.
-6. If quota is unavailable, set `next_run_time` and unlock the task.
-7. Return only quota-approved tasks to dispatch.
-
-## Upload Stage
+## Upload
 
 Owner: `handlers/upload_handler.py`
 
 Input: `INIT`
 
-Work:
-
-- Validate file path exists.
-- Build MinerU batch payload:
+MinerU request body:
 
 ```json
 {
@@ -114,123 +101,99 @@ Work:
 }
 ```
 
-- Call `MineruClient.create_upload_batch()`.
-- Store returned `batch_id` in `api_task_id`.
+Success:
+
+- Store MinerU batch id in `api_task_id`.
 - Store returned upload URL in `upload_url`.
-- Move task to `UPLOADED`.
-- Commit quota reservations only after the batch call succeeds.
+- Move to `UPLOADED`.
+- Commit quota reservation.
 
 Failure:
 
-- Release quota reservations.
-- Usually move valid tasks to `FAILED`.
-- If error includes `expired`, reset task to `INIT` and clear `upload_url`.
+- Release quota reservation.
+- Move task to `FAILED`, or reset to `INIT` if URL expiration requires a new upload URL.
 
-## PUT Stage
+## PUT Upload
 
 Owner: `handlers/put_handler.py`
 
 Input: `UPLOADED`
 
-Work:
+Success:
 
-- Validate file exists.
-- Validate `upload_url`.
-- PUT file bytes to URL.
-- Move task to `PUT_DONE`.
+- PUT PDF bytes to `upload_url`.
+- Move to `PUT_DONE`.
 
 Failure:
 
-- Move task to `FAILED`.
-- Store `last_error`.
+- Move to `FAILED`.
 
-## Poll Stage
+## Poll
 
 Owner: `handlers/poll_handler.py`
 
 Input: `PUT_DONE`
 
-Work:
+Success:
 
-- Call `MineruClient.poll_batch(batch_id)`.
-- Read `data.extract_result`.
-- Match item by `file_name`.
-- If `state == done`, move to `DOWNLOADING` and store `full_zip_url` as `zip_url`.
-- If `state == failed`, move to `FAILED`.
-- Otherwise remain `PUT_DONE`.
+- Call MinerU poll endpoint by `api_task_id`.
+- Match result item by `file_name`.
+- If state is `done`, store `full_zip_url` as `zip_url` and move to `DOWNLOADING`.
+- If state is still processing, remain `PUT_DONE`.
 
-Potential inefficiency:
+Failure:
 
-- Multiple tasks in the same MinerU batch may each poll the same `batch_id`.
+- Move to `FAILED`.
 
-## Download Stage
+## Download
 
 Owner: `handlers/download_handler.py`
 
 Input: `DOWNLOADING`
 
-Work:
+Success:
 
-- Validate `zip_url`.
-- Build stable download path through `Storage.get_download_path()`.
-- Skip existing ZIP if size > 1024 bytes.
-- Download stream and write to disk.
+- Download `zip_url` to `BASE_DIR/download`.
 - Move to `DOWNLOADED`.
 
 Failure:
 
 - Move to `FAILED`.
-- Store truncated `last_error`.
 
-## Failure Stage
+## Failure Routing
 
 Owner: `handlers/fail_handler.py`
 
-Input: `FAILED`
-
-Routing:
-
-| Error Pattern | Result |
+| Error | Route |
 | --- | --- |
 | contains `exceeds limit` | `SPLIT_NEEDED` |
-| contains `file not found` or `invalid pdf` | `DEAD` |
-| contains `429` | Retry |
-| other | Retry |
+| contains `file not found` | `DEAD` |
+| contains `invalid pdf` | `DEAD` |
+| contains `429` | retry |
+| other | retry |
 
 Retry owner: `handlers/retry_handler.py`
 
-Retry behavior:
+Retry:
 
 - If `retry_count >= MAX_RETRY`, move to `DEAD`.
-- Otherwise move to `INIT`, increment `retry_count`, set `next_run_time` using exponential backoff.
+- Otherwise move to `INIT`, increment retry count, and set `next_run_time`.
 
-Dead-letter owner: `task_queue/dlq.py`
-
-Dead behavior:
-
-- Set `status='DEAD'`.
-- Set `error_type`.
-- Set `dead_at`.
-
-## Split Stage
+## Split
 
 Owner: `handlers/split_handler.py`
 
 Input: `SPLIT_NEEDED`
 
-Work:
+Behavior:
 
-- Use `PDFSplitter` with `max_pages=MAX_FILE_PAGES`.
-- If no split is needed, move original task to `SPLIT_DONE`.
-- If split is needed:
-  - Write child PDFs under split storage.
-  - Insert child tasks as `INIT`.
-  - Set child `parent_id` to original task id.
-  - Move original task to `SPLIT_DONE`.
+- Split source PDF into chunks of at most `MAX_FILE_PAGES`.
+- Insert child tasks with `status='INIT'` and `parent_id`.
+- Move original task to `SPLIT_DONE`.
 
 ## Terminal States
 
-Terminal states are excluded by `fetch_runnable_tasks()`:
+These states are not fetched again:
 
 ```text
 DEAD
@@ -238,15 +201,28 @@ DOWNLOADED
 SPLIT_DONE
 ```
 
-## Lock Lifecycle
+## Unlock Paths
+
+Normal:
 
 ```text
-fetch_runnable_tasks()
-  -> lock_tasks()
-  -> handler update_tasks()
-  -> locked = 0, locked_at = NULL
+handler -> update_tasks() -> locked = 0, locked_at = NULL
 ```
 
-If a task is locked but not dispatched in the current loop, scheduler calls `unlock_tasks()`.
+Dispatch error:
 
-If a worker dies or a process exits while tasks are locked, Watchdog calls `heal_locks(timeout=300)`.
+```text
+Dispatcher exception -> unlock_tasks()
+```
+
+Not dispatched:
+
+```text
+Scheduler locked too many -> unlock_tasks()
+```
+
+Timeout:
+
+```text
+Watchdog -> heal_locks(timeout=300)
+```

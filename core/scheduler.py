@@ -53,39 +53,8 @@ class Scheduler:
         logger.info(
             f"[AUTO-HEAL] unlock={unlock} broken={broken}"
         )
-        # conn = get_conn()
-        # cursor = conn.cursor()
-
-        # now = int(time.time())
-
-        # cursor.execute("""
-        #     UPDATE tasks
-        #     SET locked=0
-        #     WHERE locked=1 AND (? - locked_at > 300)
-        # """, (now,))
-        # unlock = cursor.rowcount
-
-        # cursor.execute("""
-        #     UPDATE tasks
-        #     SET locked=0
-        #     WHERE locked=1 AND locked_at IS NULL
-        # """)
-        # broken = cursor.rowcount
-
-        # cursor.execute("""
-        #     UPDATE tasks
-        #     SET next_run_time=NULL
-        #     WHERE next_run_time IS NOT NULL
-        #     AND next_run_time < (? - 600)
-        # """, (now,))
-        # delay = cursor.rowcount
-
-        # conn.commit()
-
-        # if unlock or broken or delay:
         if unlock or broken :
             logger.info(f"[AUTO-HEAL] unlock={unlock} broken={broken}")
-            # logger.info(f"[AUTO-HEAL] unlock={unlock} broken={broken} delay={delay}")
 
     # =========================
     def _group_tasks(self, tasks):

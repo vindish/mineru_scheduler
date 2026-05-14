@@ -16,7 +16,7 @@ class ApiQuotaManager:
     """
     Local guardrail for MinerU submission limits.
 
-    Daily usage is persisted in SQLite; minute-level throttling is an in-memory
+    Daily usage is persisted in PostgreSQL; minute-level throttling is an in-memory
     token bucket because it only needs to protect the current process.
     """
 
@@ -41,7 +41,8 @@ class ApiQuotaManager:
 
     def _ensure_schema(self):
         conn = get_conn()
-        conn.execute(
+        cursor = conn.cursor()
+        cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS api_quota_usage (
                 quota_date TEXT PRIMARY KEY,
@@ -64,14 +65,16 @@ class ApiQuotaManager:
     def _usage(self):
         conn = get_conn()
         quota_date = self._quota_date()
-        row = conn.execute(
+        cursor = conn.cursor()
+        cursor.execute(
             """
             SELECT daily_files, high_priority_pages
             FROM api_quota_usage
-            WHERE quota_date=?
+            WHERE quota_date=%s
             """,
             (quota_date,),
-        ).fetchone()
+        )
+        row = cursor.fetchone()
         if row:
             return int(row["daily_files"] or 0), int(row["high_priority_pages"] or 0)
         return 0, 0
@@ -144,11 +147,12 @@ class ApiQuotaManager:
 
             conn = get_conn()
             quota_date = self._quota_date()
-            conn.execute(
+            cursor = conn.cursor()
+            cursor.execute(
                 """
                 INSERT INTO api_quota_usage
                 (quota_date, daily_files, high_priority_pages, updated_at)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT(quota_date) DO UPDATE SET
                     daily_files = daily_files + excluded.daily_files,
                     high_priority_pages = high_priority_pages + excluded.high_priority_pages,

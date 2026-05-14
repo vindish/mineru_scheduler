@@ -1,29 +1,46 @@
 # AI File Map
 
-This file is a compact map for agents that need to locate code quickly.
+Compact file map for fast code navigation.
 
-## Entrypoints
+## Runtime And Docker
 
 | Path | Role |
 | --- | --- |
-| `main.py` | Starts the whole process. |
-| `run.bat` | Windows launcher. |
-| `scripts/scan_tasks.py` | Can be read to understand scan insertion. |
+| `Dockerfile` | Builds scheduler image. |
+| `docker-compose.yml` | Runs PostgreSQL and scheduler. |
+| `.env.example` | Required environment template. |
+| `.dockerignore` | Keeps data/secrets out of image build context. |
+| `main.py` | Process entrypoint. |
 
-## Core Scheduling
+## Config
+
+| Path | Role |
+| --- | --- |
+| `config/settings.py` | MinerU settings, PostgreSQL settings, paths, quota, concurrency, state machine. |
+
+## Core
 
 | Path | Read When |
 | --- | --- |
-| `core/scheduler.py` | Anything about task order, quota before upload, locking, batching, heartbeat. |
-| `core/dispatcher.py` | Need to know which handler owns a status. |
-| `core/quota_manager.py` | MinerU file/day, high-priority page, file/minute behavior. |
-| `core/rate_limiter.py` | Per-stage QPS behavior. |
+| `core/scheduler.py` | Scheduling order, page checks, quota reservation, dispatch. |
+| `core/dispatcher.py` | Status-to-handler mapping. |
+| `core/quota_manager.py` | Daily quota, high-priority pages, per-minute token bucket. |
+| `core/rate_limiter.py` | Per-stage QPS logic. |
 | `core/worker_pool.py` | Thread pool and backpressure. |
-| `core/watchdog.py` | Locked task recovery. |
+| `core/watchdog.py` | Stale lock recovery. |
+
+## Database
+
+| Path | Role |
+| --- | --- |
+| `db/repository.py` | PostgreSQL connection, schema, locks, updates, inserts. |
+| `db/task_row.py` | Mutable row wrapper. |
+| `db/migrations.sql` | PostgreSQL schema reference. |
+| `db/update_buffer.py` | Future buffering extension. |
 
 ## Handlers
 
-| Path | Status |
+| Path | Input Status |
 | --- | --- |
 | `handlers/upload_handler.py` | `INIT` |
 | `handlers/put_handler.py` | `UPLOADED` |
@@ -37,46 +54,28 @@ This file is a compact map for agents that need to locate code quickly.
 
 | Path | Role |
 | --- | --- |
-| `services/mineru_client.py` | External HTTP calls to MinerU and upload/download URLs. |
-| `services/storage.py` | Runtime path generation. |
-| `services/pdf_splitter.py` | Splitting PDFs into <= configured page count. |
-| `services/file_watcher.py` | File watching extension area. |
+| `services/mineru_client.py` | MinerU HTTP API wrapper. |
+| `services/storage.py` | Runtime file paths under `BASE_DIR`. |
+| `services/pdf_splitter.py` | PDF splitting. |
+| `services/file_watcher.py` | Optional file watcher insertion. |
 
-## Database
-
-| Path | Role |
-| --- | --- |
-| `db/repository.py` | SQLite connection, migrations, locks, updates, inserts. |
-| `db/task_row.py` | Mutable row wrapper. |
-| `db/migrations.sql` | Schema reference. |
-| `db/update_buffer.py` | Future buffering extension. |
-
-## Utilities
+## Scripts
 
 | Path | Role |
 | --- | --- |
-| `utils/logger.py` | Logging config. |
-| `utils/startup_check.py` | Startup validation. |
-| `utils/backoff.py` | Exponential retry delay. |
-| `utils/decorators.py` | `with_rate_limit` decorator. |
-| `utils/time_utils.py` | Time helper. |
-
-## Scripts And SQL
-
-| Path | Role |
-| --- | --- |
+| `scripts/scan_tasks.py` | Scans PDFs and inserts `INIT` tasks into PostgreSQL. |
 | `scripts/repair_tasks.py` | Repair helper. |
-| `scripts/reset_tasks.sql` | Manual reset SQL. |
-| `scripts/retry_failed.sql` | Manual retry SQL. |
+| `scripts/reset_tasks.sql` | Manual reset SQL; review before using. |
+| `scripts/retry_failed.sql` | Manual retry SQL; review before using. |
 
 ## Docs
 
 | Path | Purpose |
 | --- | --- |
-| `README.md` | Main overview. |
+| `README.md` | Main overview and quick start. |
 | `docs/AI_HANDOFF.md` | AI onboarding. |
 | `docs/ARCHITECTURE.md` | Module architecture. |
 | `docs/FLOW.md` | Task lifecycle. |
-| `docs/CONFIG.md` | Settings and tuning. |
-| `docs/DATABASE.md` | Schema and SQL. |
-| `docs/OPERATIONS.md` | Runbook. |
+| `docs/CONFIG.md` | Config and tuning. |
+| `docs/DATABASE.md` | PostgreSQL schema and queries. |
+| `docs/OPERATIONS.md` | Docker runbook. |

@@ -27,9 +27,10 @@ class PDFHandler(FileSystemEventHandler):
             p = str(path.resolve())
 
             self.cursor.execute("""
-                INSERT OR IGNORE INTO tasks
+                INSERT INTO tasks
                 (file_path, file_name, status, created_at)
-                VALUES (?, ?, 'INIT', ?)
+                VALUES (%s, %s, 'INIT', %s)
+                ON CONFLICT (file_path) DO NOTHING
             """, (p, path.name, time.time()))
 
             self.conn.commit()

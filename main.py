@@ -2,12 +2,11 @@ import time
 import threading
 
 from core.scheduler import Scheduler
-from core.rate_limiter import RateLimiter
 from scripts.scan_tasks import scan_and_insert
-from config.settings import SCAN_INTERVAL, INIT_SQL
+from config.settings import SCAN_INTERVAL
 from utils.startup_check import run_checks
 from utils.logger import logger
-from db.repository import ensure_schema, get_conn
+from db.repository import ensure_schema, get_conn, init_db
 
 
 def scan_loop():
@@ -28,9 +27,12 @@ def monitor_loop():
             conn = get_conn()
             cursor = conn.cursor()
 
-            total = cursor.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-            done = cursor.execute("SELECT COUNT(*) FROM tasks WHERE status='DOWNLOADED'").fetchone()[0]
-            failed = cursor.execute("SELECT COUNT(*) FROM tasks WHERE status='FAILED'").fetchone()[0]
+            cursor.execute("SELECT COUNT(*) AS count FROM tasks")
+            total = cursor.fetchone()["count"]
+            cursor.execute("SELECT COUNT(*) AS count FROM tasks WHERE status='DOWNLOADED'")
+            done = cursor.fetchone()["count"]
+            cursor.execute("SELECT COUNT(*) AS count FROM tasks WHERE status='FAILED'")
+            failed = cursor.fetchone()["count"]
 
             logger.info(f"[MONITOR] total={total} done={done} failed={failed}")
 
@@ -47,10 +49,7 @@ if __name__ == "__main__":
 
         logger.info("🚀 系统启动")
 
-        conn = get_conn()
-        cursor = conn.cursor()
-        cursor.executescript(INIT_SQL)
-        conn.commit()
+        init_db()
         ensure_schema()
 
         threading.Thread(target=scan_loop, daemon=True).start()

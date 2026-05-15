@@ -10,10 +10,10 @@ git pull   # 或者用你同步代码的方式
 docker compose down
 cd ~/mineru_scheduler
 docker compose down -v        # -v 才会删 postgres_data 数据卷
+docker compose build --no-cache scheduler
 docker compose up -d --force-recreate
 docker compose logs -f scheduler --tail 50
 
-docker compose build --no-cache scheduler
 docker compose up -d --force-recreate
 docker compose up -d --force-recreate scheduler
 docker compose up -d --force-recreate postgres
@@ -24,7 +24,7 @@ docker compose logs scheduler --tail 60 | grep -E '📥|来源目录|sample|✅ 
 
 # 紧接着应该能看到扫描进度，每 500 个 flush 一次
 docker compose logs -f scheduler | grep -E 'SCAN|MONITOR'
-docker compose logs -f scheduler | grep -E 'ERROR|429|warning|FAILED'
+docker compose logs -f scheduler | grep -E 'ERROR|warning'
 
 让端口生效得 up -d 一次（端口绑定属于容器创建时的属性，不重建不会出现）：
 

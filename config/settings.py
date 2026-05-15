@@ -124,11 +124,11 @@ SUBMIT_FILE_RATE_PER_MINUTE = int(
 # ⚙️ 并发控制
 # =============================================================
 MAX_WORKERS = 12
-QPS = 2.0
-QPS_UPLOAD = 1.0
-QPS_PUT = 10.0
-QPS_POLL = 15.0
-QPS_DOWNLOAD = 5.0
+QPS = 0.8
+QPS_UPLOAD = 0.8
+QPS_PUT = 0.8
+QPS_POLL = 0.8
+QPS_DOWNLOAD = 1.0
 
 # 每轮调度各状态投喂上限
 UPLOAD_CONCURRENCY = 50

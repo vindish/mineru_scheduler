@@ -63,6 +63,7 @@ class PollHandler:
 
                     if item is None:
                         t.status = "PUT_DONE"
+                        t.next_run_time = now + 60.0
                         t.last_error = None
                         updates.append(t)
                         polling += 1
@@ -82,6 +83,7 @@ class PollHandler:
                         failed += 1
                     else:
                         t.status = "PUT_DONE"
+                        t.next_run_time = now + 60.0
                         t.last_error = None
                         updates.append(t)
                         polling += 1
@@ -100,7 +102,7 @@ class PollHandler:
                 logger.warning(f"[POLL ERROR] batch_id={batch_id} error={err}")
                 for t in group:
                     t.status = "PUT_DONE"
-                    t.next_run_time = now + 30
+                    t.next_run_time = now + 60
                     t.last_error = err
                     updates.append(t)
 

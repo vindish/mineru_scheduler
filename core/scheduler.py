@@ -2,8 +2,9 @@ import time
 from collections import defaultdict
 import traceback
 from config.settings import (
-    MAX_WORKERS, QPS, FETCH_LIMIT, SCHEDULER_PRIORITY,BATCH_SIZE,QPS_UPLOAD,QPS_PUT,QPS_POLL,QPS_DOWNLOAD,
-    UPLOAD_CONCURRENCY, PUT_CONCURRENCY, POLL_CONCURRENCY,FAILED,SPLIT_NEEDED,DOWNLOADING,MAX_FILE_PAGES
+    MAX_WORKERS, QPS, FETCH_LIMIT, SCHEDULER_PRIORITY, BATCH_SIZE,
+    UPLOAD_CONCURRENCY, PUT_CONCURRENCY, POLL_CONCURRENCY,
+    FAILED, SPLIT_NEEDED, DOWNLOADING, MAX_FILE_PAGES
 )
 from db.repository import get_conn,heal_locks
 from core.worker_pool import WorkerPool
@@ -22,19 +23,10 @@ class Scheduler:
     def __init__(self):
         self.worker_pool = WorkerPool(MAX_WORKERS)
         self.rate_limiter = RateLimiter(QPS)
-        # self.dispatcher = Dispatcher(self.rate_limiter)
-        self.upload_limiter = RateLimiter(QPS_UPLOAD)
-        self.put_limiter = RateLimiter(QPS_PUT)
-        self.poll_limiter = RateLimiter(QPS_POLL)
-        self.download_limiter = RateLimiter(QPS_DOWNLOAD)
         self.quota_manager = ApiQuotaManager()
         self.dispatcher = Dispatcher(
-            rate_limiter = self.rate_limiter,
-            upload_limiter=self.upload_limiter,
-            put_limiter=self.put_limiter,
-            poll_limiter=self.poll_limiter,
-            download_limiter=self.download_limiter,
-            quota_manager=self.quota_manager
+            rate_limiter=self.rate_limiter,
+            quota_manager=self.quota_manager,
         )
         self.rate_limiter.adjust()
         self.priority = SCHEDULER_PRIORITY

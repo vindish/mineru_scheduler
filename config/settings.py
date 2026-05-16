@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 try:
     from dotenv import load_dotenv
@@ -118,17 +119,23 @@ HIGH_PRIORITY_DAILY_PAGE_LIMIT = int(
 SUBMIT_FILE_RATE_PER_MINUTE = int(
     os.getenv("MINERU_SUBMIT_FILE_RATE_PER_MINUTE", "50")
 )
+QUOTA_TIMEZONE = os.getenv("MINERU_QUOTA_TIMEZONE", "Asia/Shanghai")
+try:
+    QUOTA_TZ = ZoneInfo(QUOTA_TIMEZONE)
+except Exception:
+    QUOTA_TIMEZONE = "Asia/Shanghai"
+    QUOTA_TZ = ZoneInfo(QUOTA_TIMEZONE)
 
 
 # =============================================================
 # ⚙️ 并发控制
 # =============================================================
 MAX_WORKERS = 12
-QPS = 0.8
-QPS_UPLOAD = 0.8
-QPS_PUT = 0.8
-QPS_POLL = 0.8
-QPS_DOWNLOAD = 1.0
+QPS = 0.08
+QPS_UPLOAD = 0.08
+QPS_PUT = 0.08
+QPS_POLL = 0.08
+QPS_DOWNLOAD = 0.08
 
 # 每轮调度各状态投喂上限
 UPLOAD_CONCURRENCY = 50

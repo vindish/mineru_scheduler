@@ -21,6 +21,9 @@ class RetryHandler:
 
             if retry_count >= self.max_retry:
                 t.status = "DEAD"
+                if not getattr(t, "error_type", None):
+                    t.error_type = "RETRY_EXHAUSTED"
+                t.dead_at = time.time()
                 updates.append(t)
 
                 continue

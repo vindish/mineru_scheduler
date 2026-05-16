@@ -1,11 +1,13 @@
 import math
+import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, time as datetime_time, timedelta
 from threading import Lock
 
 from config.settings import (
     DAILY_FILE_LIMIT,
     HIGH_PRIORITY_DAILY_PAGE_LIMIT,
+    QUOTA_TZ,
     SUBMIT_FILE_RATE_PER_MINUTE,
 )
 from db.repository import get_conn
@@ -55,11 +57,11 @@ class ApiQuotaManager:
         conn.commit()
 
     def _quota_date(self):
-        return datetime.now().strftime("%Y-%m-%d")
+        return datetime.now(QUOTA_TZ).strftime("%Y-%m-%d")
 
     def _seconds_until_next_day(self):
-        now = datetime.now()
-        tomorrow = datetime(now.year, now.month, now.day) + timedelta(days=1)
+        now = datetime.now(QUOTA_TZ)
+        tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime_time.min, QUOTA_TZ)
         return max(1.0, (tomorrow - now).total_seconds())
 
     def _usage(self):
@@ -119,15 +121,9 @@ class ApiQuotaManager:
             deferred = list(tasks[allowed_count:])
             self.tokens -= allowed_count
 
-            high_remaining = max(
-                0,
-                self.high_priority_page_limit - used_high_pages - pending_high_pages,
-            )
             for task in allowed:
                 pages = int(getattr(task, "page_count", None) or 1)
-                high_pages = min(high_remaining, pages)
-                high_remaining -= high_pages
-                self.pending[task.id] = (1, high_pages)
+                self.pending[task.id] = (1, max(1, pages))
 
             return allowed, deferred, 0.0
 
@@ -166,6 +162,41 @@ class ApiQuotaManager:
                 f"[QUOTA] commit files={files} high_pages={high_pages} "
                 f"date={quota_date}"
             )
+
+    def mark_daily_limit_reached(self, message=None):
+        with self.lock:
+            files = self.daily_file_limit
+            high_pages = None
+            if message:
+                match = re.search(r"(\d+)\s*/\s*(\d+)", str(message))
+                if match:
+                    high_pages = max(int(match.group(1)), int(match.group(2)))
+
+            conn = get_conn()
+            quota_date = self._quota_date()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO api_quota_usage
+                (quota_date, daily_files, high_priority_pages, updated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(quota_date) DO UPDATE SET
+                    daily_files = GREATEST(api_quota_usage.daily_files, excluded.daily_files),
+                    high_priority_pages = GREATEST(api_quota_usage.high_priority_pages, excluded.high_priority_pages),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    quota_date,
+                    files,
+                    high_pages if high_pages is not None else self.high_priority_page_limit,
+                    time.time(),
+                ),
+            )
+            conn.commit()
+            logger.warning(
+                f"[QUOTA] official daily limit reached; local quota marked full date={quota_date}"
+            )
+            return self._seconds_until_next_day()
 
     def release_reservations(self, tasks):
         with self.lock:

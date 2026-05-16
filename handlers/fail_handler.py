@@ -1,8 +1,11 @@
+import time
+
 from handlers.retry_handler import RetryHandler
 from db.repository import update_tasks
 from task_queue.dlq import DeadLetterQueue
 from utils.logger import logger
 from db.task_row import TaskRow
+from handlers.upload_handler import is_daily_limit_error
 
 
 # 临时性错误关键字（命中即走重试）
@@ -61,12 +64,15 @@ class FailHandler:
         retry_tasks = []
         split_tasks = []
         dead_tasks = []
+        quota_tasks = []
 
         for t in tasks:
             try:
                 error = (t.last_error or "").lower()
 
-                if "exceeds limit" in error:
+                if is_daily_limit_error(error):
+                    quota_tasks.append(t)
+                elif "exceeds limit" in error:
                     split_tasks.append(t)
                 elif any(k in error for k in FATAL_KEYWORDS):
                     dead_tasks.append(t)
@@ -82,6 +88,16 @@ class FailHandler:
 
         if retry_tasks:
             self.retry_handler.handle_batch(retry_tasks)
+
+        if quota_tasks:
+            now = time.time()
+            delay = 6 * 60 * 60
+            for t in quota_tasks:
+                t.status = "INIT"
+                t.next_run_time = now + delay
+                t.error_type = "API_DAILY_LIMIT"
+                t.locked = 0
+            update_tasks(quota_tasks)
 
         if dead_tasks:
             self.dlq.push_batch(dead_tasks, error_type="FATAL")

@@ -8,6 +8,18 @@ from services.mineru_client import MineruClient, RateLimitError
 from db.task_row import TaskRow
 
 
+DAILY_LIMIT_KEYWORDS = (
+    "daily limit reached",
+    "submit tomorrow",
+    "5000 tasks",
+)
+
+
+def is_daily_limit_error(error):
+    text = (error or "").lower()
+    return any(k in text for k in DAILY_LIMIT_KEYWORDS)
+
+
 class UploadHandler:
     def __init__(self, rate_limiter=None, quota_manager=None):
         self.rate_limiter = rate_limiter
@@ -105,6 +117,28 @@ class UploadHandler:
         except Exception as e:
             err = str(e)
             logger.error(f"[UPLOAD ERROR] {err}")
+
+            if is_daily_limit_error(err):
+                wait = 24 * 60 * 60
+                if self.quota_manager:
+                    self.quota_manager.release_reservations(valid)
+                    wait = self.quota_manager.mark_daily_limit_reached(err)
+                now = time.time()
+                logger.warning(
+                    f"[UPLOAD DAILY LIMIT] defer tasks={len(valid)} wait={wait:.1f}s"
+                )
+                for t in valid:
+                    t.status = "INIT"
+                    t.next_run_time = now + wait
+                    t.last_error = err
+                    t.error_type = "API_DAILY_LIMIT"
+                    t.locked = 0
+                    updates.append(t)
+                if updates:
+                    update_tasks(updates)
+                logger.info(f"[UPLOAD] done update={len(updates)}")
+                return
+
             if self.quota_manager:
                 self.quota_manager.release_reservations(valid)
             for t in valid:
